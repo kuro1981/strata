@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+
+
+
+
+members = ["crates/strata-core", "crates/tex2math"]
