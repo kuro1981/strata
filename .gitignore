@@ -21,3 +21,4 @@ node_modules/
 .devenv/nix-eval-cache.db*
 .devenv/shell-*.sh
 .devenv/nixpkgs-config-*.nix
+target/
