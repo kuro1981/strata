@@ -92,6 +92,22 @@ pub struct YamlResumeEducation {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum YamlResumeContent {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl std::fmt::Display for YamlResumeContent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            YamlResumeContent::Single(s) => write!(f, "{}", s),
+            YamlResumeContent::Multiple(v) => write!(f, "{}", v.join("\n")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlResumeWork {
     #[serde(default)]
     pub year: Option<u32>,
@@ -100,15 +116,16 @@ pub struct YamlResumeWork {
     #[serde(default)]
     pub org: Option<String>,
     #[serde(default)]
-    pub detail: Option<String>,
+    pub detail: Option<YamlResumeContent>,
     #[serde(default)]
-    pub content: Option<String>,
+    pub content: Option<YamlResumeContent>,
 }
 
 impl YamlResumeWork {
     pub fn get_detail(&self) -> String {
-        self.detail.clone()
-            .or_else(|| self.content.clone())
+        self.detail.as_ref()
+            .or(self.content.as_ref())
+            .map(|c| c.to_string())
             .unwrap_or_default()
     }
 }
