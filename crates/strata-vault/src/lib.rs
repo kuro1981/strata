@@ -93,9 +93,13 @@ pub struct YamlResumeEducation {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlResumeWork {
+    #[serde(default)]
     pub year: Option<u32>,
+    #[serde(default)]
     pub month: Option<u32>,
+    #[serde(default)]
     pub org: Option<String>,
+    #[serde(default)]
     pub detail: String,
 }
 
