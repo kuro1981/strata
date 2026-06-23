@@ -1,0 +1,13 @@
+[package]
+name = "strata-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strata-core = { path = "../strata-core" }
+strata-vault = { path = "../strata-vault" }
+strata-html = { path = "../strata-html" }
+strata-typst = { path = "../strata-typst" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"

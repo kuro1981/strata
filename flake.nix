@@ -21,15 +21,31 @@
         then import ./.devenv/lang-dev.nix { inherit pkgs; }
         else import ./lang-dev.nix { inherit pkgs; };
     in {
+      packages.${system} = {
+        default = pkgs.rustPlatform.buildRustPackage {
+          pname = "strata-cli";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+          };
+        };
+      };
 
       devShells.${system} = {
         # Primary, default development shell. `init-devenv.sh` will
         # adjust the `buildInputs` line here to include language
         # packages if you choose one when bootstrapping the project.
         default = pkgs.mkShell {
-          buildInputs = devCommon.commonDev ++ devLang.rustPackages;
+          buildInputs = devCommon.commonDev ++ devLang.rustPackages ++ [
+            pkgs.typst
+            pkgs.hackgen-font
+            pkgs.noto-fonts-cjk-sans
+            pkgs.ipaexfont
+          ];
           shellHook = ''
             export PATH="$HOME/.local/bin:$PATH"
+            export TYPST_FONT_PATHS="${pkgs.hackgen-font}/share/fonts:${pkgs.noto-fonts-cjk-sans}/share/fonts:${pkgs.ipaexfont}/share/fonts"
           '';
         };
 

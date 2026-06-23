@@ -1,0 +1,37 @@
+type: resume
+name: "黒田 太郎"
+name_yomi: "くろだ たろう"
+birthday: "1990年1月1日"
+age: 36
+photo: ""
+
+contact:
+  zip: "100-0001"
+  address: "東京都豊島区豊島"
+  address_yomi: "とうきょうと としまく としま"
+  tel: "090-XXXX-XXXX"
+  email: "kuro@example.com"
+
+history:
+  - period: "2008-04 ~ 2012-03"
+    org: "東京理科大学 工学部"
+    detail: "情報工学科 卒業"
+  - period: "2012-04 ~ 2015-03"
+    org: "日本システム構築株式会社"
+    detail: "ソフトウェア開発部 エンジニア (正社員)"
+  - period: "2015-04 ~ 2020-09"
+    org: "株式会社フロンティアテクノロジー"
+    detail: "技術本部 リードエンジニア (正社員)"
+  - period: "2020-10 ~ 現在"
+    org: "個人事業主 (Strata Technology)"
+    detail: "フリーランス ソフトウェアアーキテクト"
+
+certifications:
+  - date: "2011-06"
+    name: "基本情報技術者"
+  - date: "2013-10"
+    name: "応用情報技術者"
+  - date: "2021-04"
+    name: "AWS Certified Solutions Architect - Professional"
+
+motivation: "これまで一貫してバックエンド開発に従事し、特に [Rust](term:Rust) や [Go](term:Go) を用いた高信頼性・高性能な分散システムの設計・構築に強みを持っています。単にコードを書くだけでなく、ドキュメントとコードの乖離を防ぐための新しいドキュメントスキーマ [Strata](term:Strata) の考案や、チーム全体の開発生産性向上を目的としたツール・仕組みづくりにも積極的に貢献してきました。今後も技術によるビジネス課題の解決をリードしていきたいと考えています。"
