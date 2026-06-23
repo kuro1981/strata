@@ -100,7 +100,17 @@ pub struct YamlResumeWork {
     #[serde(default)]
     pub org: Option<String>,
     #[serde(default)]
-    pub detail: String,
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+impl YamlResumeWork {
+    pub fn get_detail(&self) -> String {
+        self.detail.clone()
+            .or_else(|| self.content.clone())
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -467,7 +477,7 @@ impl Parser {
                     cells.push(Cell {
                         row_path: vec![key.clone()],
                         col_path: vec!["detail".to_string()],
-                        value: CellValue::Text { v: w.detail.clone() },
+                        value: CellValue::Text { v: w.get_detail() },
                     });
                 }
             }
