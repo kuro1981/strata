@@ -275,19 +275,41 @@ impl Parser {
     }
 
     pub fn parse_vault(mut self, yaml_str: &str) -> Result<Vault, String> {
-        let doc: YamlDocument = serde_yaml::from_str(yaml_str)
+        let v: serde_yaml::Value = serde_yaml::from_str(yaml_str)
             .map_err(|e| format!("YAML parse error: {}", e))?;
 
         let mut graph = Graph::default();
-        let root_id = match doc {
-            YamlDocument::Resume(resume) => {
-                self.build_graph_from_resume(*resume, &mut graph)?
+        let root_id = if let Some(doc_type) = v.get("type").and_then(|t| t.as_str()) {
+            match doc_type {
+                "resume" => {
+                    let resume: YamlResume = serde_yaml::from_value(v)
+                        .map_err(|e| format!("YamlResume parse error: {}", e))?;
+                    self.build_graph_from_resume(resume, &mut graph)?
+                }
+                "work_history" => {
+                    let work_history: YamlWorkHistory = serde_yaml::from_value(v)
+                        .map_err(|e| format!("YamlWorkHistory parse error: {}", e))?;
+                    self.build_graph_from_work_history(work_history, &mut graph)?
+                }
+                _ => {
+                    let root_node: YamlNode = serde_yaml::from_value(v)
+                        .map_err(|e| format!("YamlNode parse error: {}", e))?;
+                    self.parse_yaml_node(&root_node, &mut graph, None)?
+                }
             }
-            YamlDocument::WorkHistory(work_history) => {
-                self.build_graph_from_work_history(*work_history, &mut graph)?
-            }
-            YamlDocument::Standard(root_node) => {
-                self.parse_yaml_node(&root_node, &mut graph, None)?
+        } else {
+            let doc: YamlDocument = serde_yaml::from_value(v)
+                .map_err(|e| format!("YAML parse error: {}", e))?;
+            match doc {
+                YamlDocument::Resume(resume) => {
+                    self.build_graph_from_resume(*resume, &mut graph)?
+                }
+                YamlDocument::WorkHistory(work_history) => {
+                    self.build_graph_from_work_history(*work_history, &mut graph)?
+                }
+                YamlDocument::Standard(root_node) => {
+                    self.parse_yaml_node(&root_node, &mut graph, None)?
+                }
             }
         };
 
