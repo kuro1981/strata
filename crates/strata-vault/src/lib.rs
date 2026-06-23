@@ -60,6 +60,7 @@ pub struct YamlResume {
     pub hobbies: Option<String>,
     pub sports: Option<String>,
     pub spouse: Option<YamlResumeSpouse>,
+    pub remarks: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
