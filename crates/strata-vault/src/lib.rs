@@ -32,6 +32,22 @@ impl std::fmt::Display for YamlResumeName {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum YamlResumeCommaList {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl std::fmt::Display for YamlResumeCommaList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            YamlResumeCommaList::Single(s) => write!(f, "{}", s),
+            YamlResumeCommaList::Multiple(v) => write!(f, "{}", v.join("、")),
+        }
+    }
+}
+
 /// 人間用のシンプルな履歴書スキーマ
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YamlResume {
@@ -57,8 +73,8 @@ pub struct YamlResume {
     pub licenses: Option<Vec<YamlResumeLicense>>,
     pub health: Option<String>,
     pub dependents_excluding_spouse: Option<u32>,
-    pub hobbies: Option<String>,
-    pub sports: Option<String>,
+    pub hobbies: Option<YamlResumeCommaList>,
+    pub sports: Option<YamlResumeCommaList>,
     pub spouse: Option<YamlResumeSpouse>,
     pub remarks: Option<String>,
 }
