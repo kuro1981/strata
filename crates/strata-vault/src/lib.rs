@@ -114,17 +114,12 @@ pub struct YamlResumeWork {
     #[serde(default)]
     pub month: Option<u32>,
     #[serde(default)]
-    pub org: Option<String>,
-    #[serde(default)]
-    pub detail: Option<YamlResumeContent>,
-    #[serde(default)]
     pub content: Option<YamlResumeContent>,
 }
 
 impl YamlResumeWork {
     pub fn get_detail(&self) -> String {
-        self.detail.as_ref()
-            .or(self.content.as_ref())
+        self.content.as_ref()
             .map(|c| c.to_string())
             .unwrap_or_default()
     }
@@ -489,7 +484,7 @@ impl Parser {
                     cells.push(Cell {
                         row_path: vec![key.clone()],
                         col_path: vec!["org".to_string()],
-                        value: CellValue::Text { v: w.org.clone().unwrap_or_default() },
+                        value: CellValue::Text { v: "".to_string() },
                     });
                     cells.push(Cell {
                         row_path: vec![key.clone()],
