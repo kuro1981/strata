@@ -8,6 +8,7 @@ strata-core = { path = "../strata-core" }
 strata-vault = { path = "../strata-vault" }
 strata-html = { path = "../strata-html" }
 strata-typst = { path = "../strata-typst" }
+strata-sml = { path = "../strata-sml" }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

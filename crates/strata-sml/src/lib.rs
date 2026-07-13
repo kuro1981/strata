@@ -17,6 +17,7 @@
 pub mod ast;
 pub mod block;
 pub mod error;
+pub mod fmt;
 pub mod inline;
 pub mod scan;
 pub mod span;
@@ -24,6 +25,7 @@ pub mod table;
 
 pub use ast::*;
 pub use error::{Diag, DiagKind};
+pub use fmt::{format, format_with, FmtOutput, Patch};
 pub use span::Span;
 
 /// パース結果。パーサは最初のエラーで止まらず収集する(sml-spec §8.2 の

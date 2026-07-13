@@ -373,6 +373,7 @@ dependencies = [
  "serde_yaml",
  "strata-core",
  "strata-html",
+ "strata-sml",
  "strata-typst",
  "strata-vault",
 ]
