@@ -1,0 +1,45 @@
+//! 診断(Diag)。パーサは最初のエラーで止まらず収集する(sml-parser-design.md §6)。
+//!
+//! 「全か無か」(sml-spec §8.2)の裁定は呼び出し側(fmt/build)の仕事: `diags` が
+//! 非空なら何もしない、という判断はここではしない。将来の LSP は部分 AST を使える。
+
+use crate::span::Span;
+
+/// 診断の種別。tex2math の `ParseError` 同様、型で分類する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagKind {
+    /// `::`フェンス/コードフェンスが閉じられずファイル末尾に到達した。
+    UnclosedFence,
+    /// 属性行の直後に空行(またはファイル終端)があり、束縛先ブロックがない。
+    OrphanAttrLine,
+    /// 行型ブロックの `{#...}` とプローズ属性行の `id=` が同じブロックに併記された。
+    DuplicateId,
+    /// 行型ブロック(見出し・リスト・フェンス)の前置属性行に `id=` が書かれている
+    /// (sml-spec §4: id を書けるのはプローズブロックの属性行だけ)。`{#...}` タグとの
+    /// 併記は `DuplicateId` になるため、こちらは `{#...}` が**無い**ケース専用。
+    IdNotAllowedHere,
+    /// key / エイリアス / member key が `[A-Za-z0-9_-]+` の外の文字を含む(D5)。
+    BadKeyCharset,
+    /// セル座標(`path | path`)が字句として不正。`::table` 本体の `@cells` セル行
+    /// (sml-spec §6.1)と、インライン `cell:` 参照の座標(sml-spec §5.3)の
+    /// 両方でこの同じ variant を使う(どちらも座標の文法は §7 の path 規則で共通)。
+    BadCellCoord,
+    /// `::table` 本体のインデントが2スペース単位で揃っていない。
+    InconsistentIndent,
+    /// インライン参照のスキームが `ref/term/table/fig/math/cell` のいずれでもない。
+    UnknownScheme,
+}
+
+/// 1件の診断。位置(スパン)と人間可読メッセージを持つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diag {
+    pub kind: DiagKind,
+    pub span: Span,
+    pub msg: String,
+}
+
+impl Diag {
+    pub fn new(kind: DiagKind, span: Span, msg: impl Into<String>) -> Self {
+        Diag { kind, span, msg: msg.into() }
+    }
+}
