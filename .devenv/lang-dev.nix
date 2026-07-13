@@ -11,6 +11,7 @@
     rustc
     cargo
     rust-analyzer
+    clippy
   ];
 
   pythonPackages = with pkgs; [
