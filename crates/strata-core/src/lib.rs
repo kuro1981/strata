@@ -384,7 +384,8 @@ pub mod invariants {
         ContainsCycle { at: NodeId },
     }
 
-    /// 安価な構造検証。指示語禁止(不変条件3)は「型に指示語が無い」ため検査不要。
+    /// 安価な構造検証。指示語禁止(不変条件3)は型では守れない(`Inline::Text` は
+    /// 自由文字列なので「下の表」と書ける)。禁止フレーズ検出は将来の lint 層の仕事(§1.1)。
     /// 複数親(トランスクルージョン)は許す(不変条件5)ので検査しない。
     pub fn validate(g: &Graph) -> Vec<Violation> {
         let mut v = Vec::new();
