@@ -59,7 +59,9 @@ pub(crate) fn parse_frontmatter(src: &str, diags: &mut Vec<Diag>) -> (Option<Fro
 
 /// 開き `---` と閉じ `---` の間の行を `key: value` として解釈する(コロン後の空白は
 /// 任意)。空行は無視する。キーが `id` / `title` 以外なら `UnknownFrontmatterKey`。
-/// `id` の値が ULID でなければ `BadIdValue`(sml-spec §2.1)。
+/// `id` の値が ULID でなければ `BadIdValue`(sml-spec §2.1)。同一キーが複数回
+/// 現れたら `DuplicateFrontmatterKey`(D17、`Warning`)。挙動は従来どおり後勝ち
+/// (最後の出現が採用される)のまま変えない。
 fn parse_body(
     src: &str,
     lines: &[PhysLine],
@@ -67,6 +69,7 @@ fn parse_body(
 ) -> (Option<(RefTarget, Span)>, Option<String>) {
     let mut id = None;
     let mut title = None;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in lines {
         let text = line.content.slice(src);
@@ -91,6 +94,14 @@ fn parse_body(
                 (key, "", Span::new(content_start, content_start + key.len()))
             }
         };
+
+        if !seen.insert(key.to_string()) {
+            diags.push(Diag::new(
+                DiagKind::DuplicateFrontmatterKey,
+                line.content,
+                format!("フロントマターキー '{key}' が複数回宣言されています(最後の宣言を採用します)"),
+            ));
+        }
 
         match key {
             "id" => {

@@ -258,9 +258,10 @@ impl<'a> Builder<'a> {
         let rows = self.convert_dims(&tb.rows);
         let cols = self.convert_dims(&tb.cols);
         let cells = tb.cells.iter().map(|c| self.convert_cell(c)).collect();
-        self.graph.insert(Node { id, payload: NodePayload::Table(Table { rows, cols, cells }) });
-        // フェンス内の `[caption=...]` は strata_core::Table に対応フィールドが無いため
-        // 意図的に破棄する(既知の制約。最終報告で明記)。
+        // フェンス内の `[caption=...]` を strata_core::Table.caption へ写す(D16)。
+        let entries: Vec<&(String, AttrValue, Span)> = fb.fence_attrs.iter().flat_map(|al| al.entries.iter()).collect();
+        let caption = find_entry(&entries, "caption").map(|(_, v, _)| vec![Inline::Text { s: attr_value_string(v) }]);
+        self.graph.insert(Node { id, payload: NodePayload::Table(Table { rows, cols, cells, caption }) });
     }
 
     fn convert_dims(&self, dims: &[DimNode]) -> Vec<Dim> {
@@ -349,15 +350,12 @@ impl<'a> Builder<'a> {
         };
 
         let data_ref = self.resolve_attr_target(&data_ref_str, data_ref_span);
+        // `[depicts=...]` / `[depicts.<key>=...]` を ImageFigure.depicts と同形で写す(D16)。
+        let depicts = fold_depicts(entries);
         self.graph.insert(Node {
             id,
-            payload: NodePayload::Figure(Figure::Chart(Chart { data_ref, mark, encode: Encoding { x, y, color }, caption })),
+            payload: NodePayload::Figure(Figure::Chart(Chart { data_ref, mark, encode: Encoding { x, y, color }, caption, depicts })),
         });
-        // chart は sml-build-m3-handoff.md D-B5 の記述上 data_ref/mark/encode/caption
-        // のみを持つ(depicts は image 専用)。draft/formatted フィクスチャの
-        // `::figure {#perf-chart}` は chart に `[depicts=...]` を付けているが、
-        // `strata_core::Chart` に対応フィールドが無いため意図的に破棄する
-        // (既知の制約。最終報告で明記)。
     }
 
     fn build_image_figure(&mut self, id: NodeId, entries: &[&(String, AttrValue, Span)], block_span: Span) {
@@ -374,17 +372,25 @@ impl<'a> Builder<'a> {
             return;
         };
 
-        let mut depicts: BTreeMap<String, String> = BTreeMap::new();
-        for (k, v, _) in entries {
-            if k == "depicts" {
-                depicts.insert("description".to_string(), attr_value_string(v));
-            } else if let Some(rest) = k.strip_prefix("depicts.") {
-                depicts.insert(rest.to_string(), attr_value_string(v));
-            }
-        }
+        let depicts = fold_depicts(entries);
 
         self.graph.insert(Node { id, payload: NodePayload::Figure(Figure::Image(ImageFigure { src, alt, depicts, caption })) });
     }
+}
+
+/// `[depicts=...]` / `[depicts.<key>=...]` の畳み規則(sml-spec §6.3、D16)。
+/// 裸の `depicts` は `"description"` キー、`depicts.<key>` はその `<key>` をキーにする。
+/// `ImageFigure.depicts` と `Chart.depicts`(D16)で共有する。
+fn fold_depicts(entries: &[&(String, AttrValue, Span)]) -> BTreeMap<String, String> {
+    let mut depicts: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v, _) in entries {
+        if k == "depicts" {
+            depicts.insert("description".to_string(), attr_value_string(v));
+        } else if let Some(rest) = k.strip_prefix("depicts.") {
+            depicts.insert(rest.to_string(), attr_value_string(v));
+        }
+    }
+    depicts
 }
 
 fn convert_emph_kind(k: SmlEmphKind) -> CoreEmphKind {

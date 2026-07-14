@@ -175,6 +175,9 @@ fn run_fmt(args: FmtArgs) {
             std::process::exit(2);
         }
         Ok(out) => {
+            // D17: Warning は stderr に出しつつ exit 0(全か無かの対象外)。
+            print_warnings(&out.warnings, &src);
+
             if out.patches.is_empty() {
                 // 変更不要: --check の有無によらず exit 0。
                 std::process::exit(0);
@@ -224,6 +227,9 @@ fn run_build(args: BuildArgs) {
             std::process::exit(2);
         }
         Ok(out) => {
+            // D17: Warning は stderr に出しつつ exit 0(全か無かの対象外)。
+            print_warnings(&out.warnings, &src);
+
             let json = match serde_json::to_string_pretty(&out) {
                 Ok(j) => j,
                 Err(e) => {
@@ -303,6 +309,15 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
             vec![format!("{}:{}: RefTypeMismatch: {}", line, col, msg)]
         }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
+    }
+}
+
+/// D17: `Warning` 診断を「行:列: warning: 種別: メッセージ」形式で stderr に出す。
+/// `fmt` / `build` の両方で共有する(全か無かの対象外なので exit code には影響しない)。
+fn print_warnings(warnings: &[strata_sml::Diag], src: &str) {
+    for w in warnings {
+        let (line, col) = w.span.line_col(src);
+        eprintln!("{}:{}: warning: {:?}: {}", line, col, w.kind, w.msg);
     }
 }
 

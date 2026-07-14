@@ -144,6 +144,12 @@ fn golden_structural_shape() {
                 .find(|c| c.row_path == vec!["Opt-v2".to_string()] && c.col_path == vec!["Dataset-A".to_string(), "Latency".to_string()])
                 .expect("Opt-v2 | Dataset-A.Latency cell exists");
             assert_eq!(opt_v2_latency.value, CellValue::Quantity { v: 12.0, unit: "ms".to_string() });
+
+            // D16: フェンス内 `[caption=...]` が Table.caption へ写ること。
+            match t.caption.as_deref() {
+                Some([Inline::Text { s }]) => assert_eq!(s, "モデル別・データセット別の性能比較"),
+                other => panic!("expected Table.caption with a single Inline::Text, got {other:?}"),
+            }
         }
         other => panic!("expected Table, got {other:?}"),
     }
@@ -157,6 +163,16 @@ fn golden_structural_shape() {
             assert_eq!(chart.encode.y, "Dataset-A.F1-Score");
             assert_eq!(chart.encode.color, None);
             assert!(chart.caption.is_some());
+
+            // D16: 裸の `[depicts=...]` が Chart.depicts の "description" キーへ写ること
+            // (ImageFigure.depicts と同じ畳み規則)。
+            assert_eq!(chart.depicts.len(), 1);
+            assert_eq!(
+                chart.depicts.get("description").map(String::as_str),
+                Some(
+                    "Baseline-v1 と Opt-v2 の Dataset-A における F1 スコアの比較。Baseline-v1 が 0.82 であるのに対し、Opt-v2 は 0.91 へと向上していることを示す棒グラフ。"
+                )
+            );
         }
         other => panic!("expected Figure::Chart, got {other:?}"),
     }

@@ -100,8 +100,29 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
 
     check_id_placement(&attrs, &kind, diags);
     check_id_value(&attrs, &kind, diags);
+    check_unknown_attr_keys(&attrs, diags);
 
     SmlBlock { span: rb.full_span, attrs, kind }
+}
+
+/// sml-spec §4.1 + D17: ブロック前置属性行(意味エッジ宣言用)のキーが
+/// `supports` / `depends-on` / `cites` / `id` / `alias` のいずれでもなければ
+/// `UnknownAttrKey`(`Warning`)。`apply_block_attrs`(strata-build)は未知キーを
+/// 従来どおり黙って無視し続けるため、これは「エッジが張られないタイポ」に気付く
+/// ための警告に過ぎない。フェンス内属性行(`::table`/`::figure` の `[caption=...]`
+/// 等、`fb.fence_attrs`)は語彙が別物なのでこの検査の対象外。
+fn check_unknown_attr_keys(attrs: &Option<AttrLine>, diags: &mut Vec<Diag>) {
+    const KNOWN: [&str; 5] = ["supports", "depends-on", "cites", "id", "alias"];
+    let Some(attr_line) = attrs else { return };
+    for (key, _, span) in &attr_line.entries {
+        if !KNOWN.contains(&key.as_str()) {
+            diags.push(Diag::new(
+                DiagKind::UnknownAttrKey,
+                *span,
+                format!("属性キー '{key}' は既知のキー(supports/depends-on/cites/id/alias)ではありません(タイポの可能性。エッジは張られません)"),
+            ));
+        }
+    }
 }
 
 /// sml-spec §4: 「id を書けるのはプローズブロックの属性行だけ(行型は `{#}` を使う。
@@ -658,7 +679,10 @@ mod tests {
 
     #[test]
     fn attr_line_quoted_value() {
-        let (blocks, diags) = parse("[caption=\"a b c\"]\nParagraph.\n");
+        // D17: ブロック前置属性行のキーは既知のもの(supports 等)を使う。`caption` は
+        // フェンス内属性行専用の語彙であり、ここで使うと `UnknownAttrKey`(Warning)が
+        // 発生してこのテストの主眼(引用符付き値のパース)とは無関係な診断が混ざる。
+        let (blocks, diags) = parse("[cites=\"a b c\"]\nParagraph.\n");
         assert!(diags.is_empty());
         let entries = &blocks[0].attrs.as_ref().unwrap().entries;
         assert_eq!(entries[0].1, AttrValue::Quoted("a b c".to_string()));

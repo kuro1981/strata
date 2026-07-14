@@ -25,7 +25,7 @@ pub mod span;
 pub mod table;
 
 pub use ast::*;
-pub use error::{Diag, DiagKind};
+pub use error::{Diag, DiagKind, Severity};
 pub use fmt::{format, format_with, FmtOutput, Patch};
 pub use span::Span;
 

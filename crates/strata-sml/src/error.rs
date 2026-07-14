@@ -2,11 +2,27 @@
 //!
 //! 「全か無か」(sml-spec §8.2)の裁定は呼び出し側(fmt/build)の仕事: `diags` が
 //! 非空なら何もしない、という判断はここではしない。将来の LSP は部分 AST を使える。
+//!
+//! D17(2026-07-14 裁定): 診断には severity(`Error` / `Warning`)がある。「全か無か」は
+//! **`Error` にのみ適用**する — `Warning` だけの場合は fmt/build は成功し、`Warning` を
+//! 結果と併せて呼び出し側に返す(`FmtOutput::warnings` / `BuildOutput::warnings`)。
+//! 新設した2種別(`DuplicateFrontmatterKey` / `UnknownAttrKey`)のみ `Warning`。
+//! 既存の種別はすべて `Error` のまま(挙動は変えない)。
+
+use serde::{Deserialize, Serialize};
 
 use crate::span::Span;
 
+/// 診断の重大度(D17)。「全か無か」の判定基準は `Error` の有無だけを見る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 /// 診断の種別。tex2math の `ParseError` 同様、型で分類する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DiagKind {
     /// `::`フェンス/コードフェンスが閉じられずファイル末尾に到達した。
     UnclosedFence,
@@ -40,18 +56,46 @@ pub enum DiagKind {
     UnknownFrontmatterKey,
     /// フロントマターの閉じ `---` 単独行が見つからずファイル末尾に到達した。
     UnclosedFrontmatter,
+    /// フロントマターの同一キー(`id` / `title` 等)が複数行で宣言されている(D17)。
+    /// 挙動は従来どおり後勝ち(最後の出現が採用される)のまま、`Warning`。
+    DuplicateFrontmatterKey,
+    /// 属性行のキーが `supports` / `depends-on` / `cites` / `id` / `alias` の
+    /// いずれでもない(D17)。エッジが張られないタイポの検出用。挙動は従来どおり
+    /// 無視のまま(`apply_block_attrs` は未知キーを黙って読み飛ばす)、`Warning`。
+    UnknownAttrKey,
+}
+
+impl DiagKind {
+    /// D17: 種別ごとの既定 severity。`Error` が既定で、`Warning` は明示した2種別のみ。
+    pub fn severity(self) -> Severity {
+        match self {
+            DiagKind::DuplicateFrontmatterKey | DiagKind::UnknownAttrKey => Severity::Warning,
+            _ => Severity::Error,
+        }
+    }
 }
 
 /// 1件の診断。位置(スパン)と人間可読メッセージを持つ。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diag {
     pub kind: DiagKind,
     pub span: Span,
     pub msg: String,
+    pub severity: Severity,
 }
 
 impl Diag {
+    /// `kind` から severity を自動決定する(D17)。呼び出し側が severity を
+    /// 意識せずに済むよう、既存の `Diag::new(kind, span, msg)` 呼び出し規約を温存する。
     pub fn new(kind: DiagKind, span: Span, msg: impl Into<String>) -> Self {
-        Diag { kind, span, msg: msg.into() }
+        Diag { kind, span, msg: msg.into(), severity: kind.severity() }
+    }
+
+    pub fn is_error(&self) -> bool {
+        self.severity == Severity::Error
+    }
+
+    pub fn is_warning(&self) -> bool {
+        self.severity == Severity::Warning
     }
 }

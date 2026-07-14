@@ -25,7 +25,10 @@ fn list_value() {
 
 #[test]
 fn quoted_value() {
-    let out = parse("[caption=\"モデル別・データセット別の性能比較\"]\nParagraph text.\n");
+    // D17: ブロック前置属性行のキーは既知のもの(cites 等)を使う。`caption` は
+    // フェンス内属性行専用の語彙であり、ここで使うと `UnknownAttrKey`(Warning)が
+    // 発生してこのテストの主眼(引用符付き値のパース)とは無関係な診断が混ざる。
+    let out = parse("[cites=\"モデル別・データセット別の性能比較\"]\nParagraph text.\n");
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     let attrs = out.doc.blocks[0].attrs.as_ref().unwrap();
     assert_eq!(

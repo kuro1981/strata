@@ -47,21 +47,26 @@ pub struct FmtOutput {
     pub text: String,
     /// 監査・テスト用。オフセット降順(実際に適用された順)。
     pub patches: Vec<Patch>,
+    /// パース診断のうち `Warning` のもの(D17)。「全か無か」は `Error` にのみ適用する
+    /// ため、`Warning` だけの入力でも fmt は成功し、ここに詰めて呼び出し側へ返す。
+    pub warnings: Vec<Diag>,
 }
 
 /// `src` をフォーマットする。`idgen` が返す ID の発行順は呼び出し側の責任
 /// (`format` は文書順に単調な `ulid::Generator` を使う。D-F2)。
 ///
-/// `src` のパースに1件でも診断があれば、ファイル内容には一切触れず `Err` を返す
-/// (全か無か、sml-spec §8.2)。
+/// `src` のパースに1件でも `Error` 診断があれば、ファイル内容には一切触れず `Err` で
+/// 全診断(`Error`・`Warning` 双方)を返す(全か無か、sml-spec §8.2。D17で対象を
+/// `Error` のみに絞った)。`Warning` のみなら成功し、`FmtOutput::warnings` に詰める。
 pub fn format_with(src: &str, idgen: &mut dyn FnMut() -> Ulid) -> Result<FmtOutput, Vec<Diag>> {
     let parsed = crate::parse(src);
-    if !parsed.diags.is_empty() {
+    if parsed.diags.iter().any(Diag::is_error) {
         return Err(parsed.diags);
     }
+    let warnings = parsed.diags;
     let planned = plan_patches(src, &parsed.doc, idgen);
     let (text, patches) = apply_patches(src, planned);
-    Ok(FmtOutput { text, patches })
+    Ok(FmtOutput { text, patches, warnings })
 }
 
 /// 本番エントリポイント。`ulid::Generator`(単調増加)を使い、文書順に ID を発行する。
@@ -660,6 +665,38 @@ mod tests {
             buf.replace_range(p.at..end, &p.insert);
         }
         assert_eq!(buf, out.text);
+    }
+
+    // ---- 回帰: フロントマター無し・先頭ブロックが offset 0 の純挿入パッチを ----------
+    // ---- 発行するケース(段落/リスト)でも、フロントマターが必ず先頭に来ること ---------
+    //
+    // フロントマター生成(ケース6)と、先頭ブロックの ID 挿入(段落のケース2 /
+    // リストのケース2)は、フロントマター無し文書では両方とも offset 0 の挿入
+    // パッチになる。`plan_patches` の実装コメント(83-90行目)が説明するとおり、
+    // `apply_patches` は同一 offset の挿入を「後から適用したパッチほどバッファ先頭に
+    // 来る」ため、フロントマターのパッチは `patches` 列の末尾に置かれなければならない。
+    // ここではその順序衝突を明示的に固定する(strip_generated_frontmatter に頼る他の
+    // テストはこれを暗黙に前提しているだけだった)。
+
+    #[test]
+    fn frontmatter_ends_up_first_when_leading_block_is_a_paragraph_at_offset_zero() {
+        let out = fmt_ok("Hello world.\n");
+        // フロントマターが段落の `[id=...]` 挿入より前(バッファ上でより先)に来る。
+        assert!(out.text.starts_with("---\nid: "), "{}", out.text);
+        // 閉じ `---` の直後に空行を挟んで `[id=` が続く(段落の ID 行はフロントマターの後)。
+        let (_, after_close) = out.text.split_once("---\n\n").expect("closing --- present");
+        assert!(after_close.starts_with("[id="), "{}", after_close);
+        assert!(after_close.contains("]\nHello world.\n"), "{}", after_close);
+    }
+
+    #[test]
+    fn frontmatter_ends_up_first_when_leading_block_is_a_list_at_offset_zero() {
+        let out = fmt_ok("- one\n- two\n");
+        assert!(out.text.starts_with("---\nid: "), "{}", out.text);
+        let (_, after_close) = out.text.split_once("---\n\n").expect("closing --- present");
+        // リスト全体の `[id=...]` 行がフロントマターの直後に続く(リスト項目より前)。
+        assert!(after_close.starts_with("[id="), "{}", after_close);
+        assert!(after_close.contains("]\n- one {#"), "{}", after_close);
     }
 
     // ---- 決定的 idgen による固定出力 ----------------------------------------------

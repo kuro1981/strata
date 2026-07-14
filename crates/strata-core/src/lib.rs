@@ -230,6 +230,9 @@ pub struct Table {
     pub rows: DimTree,
     pub cols: DimTree,
     pub cells: Vec<Cell>,
+    /// 表のキャプション(sml-spec §6.1 の `[caption=...]`。D16、後方互換フィールド)。
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub caption: Option<Vec<Inline>>,
 }
 
 pub type DimTree = Vec<Dim>;
@@ -335,6 +338,11 @@ pub struct Chart {
     pub encode: Encoding,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub caption: Option<Vec<Inline>>,
+    /// 構造化記述(sml-spec §6.3 の `[depicts=...]` / `[depicts.<key>=...]`。D16、
+    /// `ImageFigure.depicts` と同形・同じキー畳み規則: 裸の `depicts` は
+    /// `"description"` キー、`depicts.<key>` はその `<key>` をキーにする)。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty", default)]
+    pub depicts: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -512,6 +520,7 @@ mod tests {
                 col_path: vec!["2025".into(), "Q1".into()],
                 value: CellValue::Number { v: 100.0 },
             }],
+            caption: None,
         };
         let node = Node { id: NodeId::new(), payload: NodePayload::Table(table) };
         let json = serde_json::to_string(&node).unwrap();
@@ -686,5 +695,74 @@ mod tests {
         let legacy = format!(r#"{{"id":"{}","type":"document"}}"#, id.0);
         let parsed: Node = serde_json::from_str(&legacy).unwrap();
         assert_eq!(parsed, Node { id, payload: NodePayload::Document(Document { title: None }) });
+    }
+
+    // --- D16(2026-07-14): Table.caption / Chart.depicts の後方互換性 -----------------
+
+    /// 旧形式(caption 省略)の Table JSON が読め、caption が None で補完されること。
+    #[test]
+    fn table_deserializes_legacy_json_without_caption() {
+        let legacy = r#"{"rows":[],"cols":[],"cells":[]}"#;
+        let parsed: Table = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed, Table { rows: vec![], cols: vec![], cells: vec![], caption: None });
+    }
+
+    /// Table.caption ありの往復。caption なしなら "caption" が出力に現れないこと。
+    #[test]
+    fn table_caption_roundtrips_and_is_omitted_when_none() {
+        let with_caption = Table {
+            rows: vec![],
+            cols: vec![],
+            cells: vec![],
+            caption: Some(vec![Inline::Text { s: "表のキャプション".into() }]),
+        };
+        let json = serde_json::to_string(&with_caption).unwrap();
+        let back: Table = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_caption, back);
+
+        let without_caption = Table { rows: vec![], cols: vec![], cells: vec![], caption: None };
+        let json = serde_json::to_string(&without_caption).unwrap();
+        assert!(!json.contains("caption"));
+    }
+
+    /// 旧形式(depicts 省略)の Chart JSON が読め、depicts が空 map で補完されること。
+    #[test]
+    fn chart_deserializes_legacy_json_without_depicts() {
+        let to = NodeId::new();
+        let legacy =
+            format!(r#"{{"data_ref":"{}","mark":"bar","encode":{{"x":"a","y":"b"}}}}"#, to.0);
+        let parsed: Chart = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(
+            parsed,
+            Chart { data_ref: to, mark: Mark::Bar, encode: Encoding { x: "a".into(), y: "b".into(), color: None }, caption: None, depicts: BTreeMap::new() }
+        );
+    }
+
+    /// Chart.depicts の往復。ImageFigure.depicts と同じ畳み規則を型レベルで共有できること。
+    #[test]
+    fn chart_depicts_roundtrips_and_is_omitted_when_empty() {
+        let to = NodeId::new();
+        let mut depicts = BTreeMap::new();
+        depicts.insert("description".to_string(), "棒グラフ".to_string());
+        let chart = Chart {
+            data_ref: to,
+            mark: Mark::Bar,
+            encode: Encoding { x: "a".into(), y: "b".into(), color: None },
+            caption: None,
+            depicts,
+        };
+        let json = serde_json::to_string(&chart).unwrap();
+        let back: Chart = serde_json::from_str(&json).unwrap();
+        assert_eq!(chart, back);
+
+        let empty = Chart {
+            data_ref: to,
+            mark: Mark::Bar,
+            encode: Encoding { x: "a".into(), y: "b".into(), color: None },
+            caption: None,
+            depicts: BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&empty).unwrap();
+        assert!(!json.contains("depicts"));
     }
 }

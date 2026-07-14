@@ -525,8 +525,9 @@ impl Parser {
                 ],
             }],
             cells,
+            caption: None,
         };
-        
+
         let table_node = Node {
             id: table_id,
             payload: NodePayload::Table(history_table),
@@ -595,6 +596,7 @@ impl Parser {
                 ],
             }],
             cells: cert_cells,
+            caption: None,
         };
 
         let cert_table_node = Node {
@@ -742,6 +744,7 @@ impl Parser {
                 ],
             }],
             cells: tech_cells,
+            caption: None,
         };
 
         let tech_table_node = Node {
@@ -810,6 +813,7 @@ impl Parser {
                 ],
             }],
             cells: proj_cells,
+            caption: None,
         };
 
         let proj_table_node = Node {
@@ -909,7 +913,7 @@ impl Parser {
                         let rows = s.rows.as_ref().map(|r| self.convert_dims(r, node_id)).unwrap_or_default();
                         let cols = s.cols.as_ref().map(|c| self.convert_dims(c, node_id)).unwrap_or_default();
                         let cells = s.cells.as_ref().map(|c| self.convert_cells(c, node_id)).unwrap_or_default();
-                        NodePayload::Table(Table { rows, cols, cells })
+                        NodePayload::Table(Table { rows, cols, cells, caption: None })
                     }
                     unknown => {
                         return Err(format!("Unknown node type: {}", unknown));

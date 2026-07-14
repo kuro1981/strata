@@ -23,11 +23,12 @@ pub enum BuildError {
     /// インライン参照のスキーム(`table:`/`fig:`/`math:`/`cell:`)が対象ノードの実際の
     /// 型と一致しない(sml-build-m3-handoff.md D-B5: 「不一致は `UnresolvedAlias` では
     /// なく `BadFigure` 相当の新エラーでもよい — 裁量。ただし黙認はしない」を受けて
-    /// 新設した variant。裁量事項として最終報告で明記する)。
+    /// 新設した variant。**D14(2026-07-14、sml-spec.md §1.2)で正式承認**。
     RefTypeMismatch { span: Span, msg: String },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
-    /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant
-    /// (裁量事項として最終報告で明記する)。
+    /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。
+    /// **D14(2026-07-14、sml-spec.md §1.2)で正式承認**。ソース位置(`Span`)を
+    /// 持たないため、CLI 表示では `-:-` を使う(strata-cli の `format_build_error`)。
     Invariant(strata_core::invariants::Violation),
 }
