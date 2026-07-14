@@ -3,9 +3,10 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    llm-agents.url = "github:numtide/llm-agents.nix";
   };
 
-  outputs = { self, nixpkgs, ... }:
+  outputs = { self, nixpkgs, llm-agents, ... }:
     let
       system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
@@ -14,8 +15,8 @@
       useLocalTemplate = builtins.pathExists ./.devenv;
 
       devCommon = if useLocalTemplate
-        then import ./.devenv/common-dev.nix { inherit pkgs; }
-        else import ./common-dev.nix { inherit pkgs; };
+        then import ./.devenv/common-dev.nix { inherit pkgs; llm-agents = llm-agents.packages.${system}; }
+        else import ./common-dev.nix { inherit pkgs; llm-agents = llm-agents.packages.${system}; };
 
       devLang = if useLocalTemplate
         then import ./.devenv/lang-dev.nix { inherit pkgs; }

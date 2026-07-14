@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, llm-agents, ... }:
 
 {
   # Common development tools intended for per-project shells (devenv).
@@ -22,6 +22,7 @@
     sd
     ripgrep
     fd
+    llm-agents."claude-code"
   ];
 
 }
