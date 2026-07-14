@@ -130,6 +130,10 @@ fn plan_list_item_id(src: &str, item: &ListItem, idgen: &mut dyn FnMut() -> Ulid
 
 /// ケース4: `{#label}` の `inner_span` を `ULID alias=label` に置換する。
 /// 既に ULID なら(alias 有無問わず)何もしない。
+///
+/// `{#label alias=x}`(非 ULID + 既存 alias)はパーサが `AliasWithoutUlid` で弾く
+/// (2026-07-13 裁定)ため、ここに来る Label は常に alias 無し。既存 alias を
+/// 静かに破棄する経路は存在しない。
 fn plan_id_tag_relabel(tag: &IdTag, idgen: &mut dyn FnMut() -> Ulid, patches: &mut Vec<Patch>) {
     if let RefTarget::Label(label) = &tag.id {
         let ulid = idgen();
@@ -174,8 +178,8 @@ fn plan_prose_id(src: &str, block: &SmlBlock, idgen: &mut dyn FnMut() -> Ulid, p
                         insert: format!("{ulid}, alias={label}"),
                     });
                 }
-                // AttrValue::Quoted / List の id は仕様上想定外(id は裸トークンのみ)。
-                // 防御的に何もしない(最終報告のあいまい点を参照)。
+                // AttrValue::Quoted / List の id はパーサが BadIdValue で弾く
+                // (2026-07-13 裁定)ため、ここには到達しない。防御的に何もしない。
             }
         },
     }

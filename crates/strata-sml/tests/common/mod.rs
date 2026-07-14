@@ -5,10 +5,14 @@
 //! 共通化する。fmt の契約4(意味保存、D-F5)が draft/formatted の同型比較に加えて、
 //! fmt をかけた任意入力の同型比較にも同じロジックを再利用するため。
 //!
-//! 無視するのは: 各ブロックの id_tag 全体(alias 含む)、属性行中の `id` エントリ、
-//! すべての Span の数値。それ以外(ブロック種別・見出しレベル・リスト項目数・属性行の
-//! id 以外のエントリ・インラインの構造とテキスト内容・参照の scheme/target/coord・
-//! 表の次元木とセル)は厳密に比較する。
+//! 無視するのは「ID情報」= 各ブロックの id_tag 全体(alias 含む)、属性行中の
+//! `id`・`alias` エントリ、すべての Span の数値。それ以外(ブロック種別・見出しレベル・
+//! リスト項目数・属性行のその他エントリ・インラインの構造とテキスト内容・参照の
+//! scheme/target/coord・表の次元木とセル)は厳密に比較する。
+//!
+//! 属性行の `alias` を無視に含めるのは 2026-07-13 の裁定(sml-spec §8.1): alias は
+//! ID 情報の一部(D3)であり、fmt がケース5(`[id=label]` → `[id=ULID, alias=label]`)で
+//! 属性行に alias を新規追加するため。行末 `{#...}` タグを alias ごと無視するのと対称。
 //!
 //! `tests/common/mod.rs` は Rust の慣習どおり複数のテストバイナリ(golden_isomorphism.rs /
 //! fmt_contract.rs)からそれぞれ `mod common;` で取り込まれる。どちらか一方でしか
@@ -35,11 +39,12 @@ pub struct NAttrEntry {
     pub value: AttrValue,
 }
 
-/// 属性行1本を正規化する。`id` エントリは無視する(タスク仕様)。
+/// 属性行1本を正規化する。ID情報である `id` と `alias` のエントリは無視する
+/// (sml-spec §8.1、2026-07-13 裁定)。
 pub fn norm_attr_line(al: &AttrLine) -> Vec<NAttrEntry> {
     al.entries
         .iter()
-        .filter(|(k, _, _)| k != "id")
+        .filter(|(k, _, _)| k != "id" && k != "alias")
         .map(|(k, v, _)| NAttrEntry { key: k.clone(), value: v.clone() })
         .collect()
 }

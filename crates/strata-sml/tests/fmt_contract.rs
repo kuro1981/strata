@@ -198,20 +198,9 @@ fn contract3_arbitrary_input_patches_are_insert_only_or_bracket_confined() {
 
 // ---- 契約4: 意味保存 ---------------------------------------------------------------
 
-/// ブロック前置属性行の `alias` エントリを正規化結果から取り除く。
-///
-/// `tests/common/mod.rs` の正規化(WP5 由来)は属性行の `id` エントリだけを無視するが、
-/// fmt はケース5(`[id=label, ...]` → `[id=ULID, alias=label, ...]`)で属性行に
-/// `alias` エントリを**新規追加**する。alias は ID 情報の一部(sml-spec §3、D3)なので、
-/// 契約4の「ID 無視で同型」の比較ではここでローカルに取り除く(共通の正規化関数は
-/// golden_isomorphism.rs の検証を弱めないため変更しない)。
-fn strip_attr_alias(blocks: &mut [common::NBlock]) {
-    for b in blocks {
-        b.attrs.retain(|e| e.key != "alias");
-    }
-}
-
 /// `parse(format(x).text)` と `parse(x)` が ID 無視で同型であることを検証する。
+/// 「ID無視」の定義(属性行の `id`・`alias` エントリと id_tag 全体を無視)は
+/// `tests/common/mod.rs` の正規化関数が持つ(sml-spec §8.1、2026-07-13 裁定)。
 fn assert_semantics_preserved(src: &str) {
     let before = strata_sml::parse(src);
     assert!(before.diags.is_empty(), "precondition: source must parse cleanly: {:?}", before.diags);
@@ -220,10 +209,8 @@ fn assert_semantics_preserved(src: &str) {
     let after = strata_sml::parse(&out.text);
     assert!(after.diags.is_empty(), "formatted text must parse cleanly: {:?}", after.diags);
 
-    let mut before_norm = norm_doc(src, &before.doc);
-    let mut after_norm = norm_doc(&out.text, &after.doc);
-    strip_attr_alias(&mut before_norm);
-    strip_attr_alias(&mut after_norm);
+    let before_norm = norm_doc(src, &before.doc);
+    let after_norm = norm_doc(&out.text, &after.doc);
 
     assert_eq!(
         before_norm.len(),

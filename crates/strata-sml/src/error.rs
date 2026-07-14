@@ -20,6 +20,13 @@ pub enum DiagKind {
     IdNotAllowedHere,
     /// key / エイリアス / member key が `[A-Za-z0-9_-]+` の外の文字を含む(D5)。
     BadKeyCharset,
+    /// 属性行の `id` の値が裸トークンでない(`[id="..."]` / `[id=[a, b]]`)。
+    /// id は ULID または人間ラベルの単一トークンのみ(sml-spec §3.2。2026-07-13 裁定)。
+    BadIdValue,
+    /// `{#label alias=x}` — 非 ULID の id に alias が併記された。alias を書けるのは
+    /// ULID の id だけで、ドラフト段階では `{#label}` とだけ書く(fmt がラベルを
+    /// alias へ昇格させる。sml-spec §3.1。2026-07-13 裁定)。
+    AliasWithoutUlid,
     /// セル座標(`path | path`)が字句として不正。`::table` 本体の `@cells` セル行
     /// (sml-spec §6.1)と、インライン `cell:` 参照の座標(sml-spec §5.3)の
     /// 両方でこの同じ variant を使う(どちらも座標の文法は §7 の path 規則で共通)。

@@ -96,6 +96,7 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
     };
 
     check_id_placement(&attrs, &kind, diags);
+    check_id_value(&attrs, &kind, diags);
 
     SmlBlock { span: rb.full_span, attrs, kind }
 }
@@ -153,6 +154,43 @@ fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Ve
                     "id を書けるのはプローズブロックの属性行だけです(行型ブロックは {#...} を使ってください)",
                 )),
                 LineTypeState::NotLineType => unreachable!("早期リターン済み"),
+            }
+        }
+    }
+}
+
+/// sml-spec §3.2(2026-07-13 裁定): 属性行の `id` の値は裸トークン(ULID または
+/// 人間ラベル)のみ。引用符付き(`[id="..."]`)・リスト(`[id=[a, b]]`)は
+/// `BadIdValue`、裸トークンでも字句が `[A-Za-z0-9_-]+` の外なら `BadKeyCharset`。
+/// 診断化しないと fmt が「ULID を発行しないまま静かに素通り」する経路が残る。
+///
+/// 行型ブロックは `check_id_placement` が `id=` の存在自体を弾く(DuplicateId /
+/// IdNotAllowedHere)ため、ここでは値の検証を重ねない。
+fn check_id_value(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Vec<Diag>) {
+    if !matches!(kind, BlockKind::Paragraph { .. } | BlockKind::CodeFence { .. }) {
+        return;
+    }
+    let Some(attr_line) = attrs else { return };
+    for (key, value, span) in &attr_line.entries {
+        if key != "id" {
+            continue;
+        }
+        match value {
+            AttrValue::Single(v) => {
+                if v.parse::<Ulid>().is_err() && !is_valid_key_charset(v) {
+                    diags.push(Diag::new(
+                        DiagKind::BadKeyCharset,
+                        *span,
+                        format!("id ラベル '{v}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
+                    ));
+                }
+            }
+            AttrValue::Quoted(_) | AttrValue::List(_) => {
+                diags.push(Diag::new(
+                    DiagKind::BadIdValue,
+                    *span,
+                    "id の値は裸トークン(ULID またはラベル)のみです(引用符・リストは不可)",
+                ));
             }
         }
     }
@@ -266,14 +304,24 @@ fn extract_trailing_id_tag(src: &str, line_span: Span, diags: &mut Vec<Diag>) ->
     let inner_span = Span::new(abs_open + 2, abs_close);
     let parsed = parse_id_tag_inner(src, inner_span);
 
-    if let RefTarget::Label(label) = &parsed.tag.id
-        && !is_valid_key_charset(label)
-    {
-        diags.push(Diag::new(
-            DiagKind::BadKeyCharset,
-            parsed.id_part_span,
-            format!("id ラベル '{label}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
-        ));
+    if let RefTarget::Label(label) = &parsed.tag.id {
+        if !is_valid_key_charset(label) {
+            diags.push(Diag::new(
+                DiagKind::BadKeyCharset,
+                parsed.id_part_span,
+                format!("id ラベル '{label}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
+            ));
+        }
+        // sml-spec §3.1(2026-07-13 裁定): alias を書けるのは ULID の id だけ。
+        // ドラフトでは `{#label}` とだけ書き、fmt がラベルを alias へ昇格させる。
+        // ここで弾かないと fmt が既存 alias を静かに破棄する経路が生まれる。
+        if parsed.tag.alias.is_some() {
+            diags.push(Diag::new(
+                DiagKind::AliasWithoutUlid,
+                inner_span,
+                format!("非 ULID の id '{label}' に alias は併記できません(ドラフトでは {{#{label}}} とだけ書いてください)"),
+            ));
+        }
     }
     if let Some(alias) = &parsed.tag.alias
         && !is_valid_key_charset(alias)
@@ -638,6 +686,53 @@ mod tests {
     fn bad_key_charset_on_attr_key() {
         let (_, diags) = parse("[bad key=1]\nParagraph.\n");
         assert!(diags.iter().any(|d| d.kind == DiagKind::BadKeyCharset), "{diags:?}");
+    }
+
+    /// sml-spec §3.1(2026-07-13 裁定): 非 ULID の id に alias は併記できない。
+    #[test]
+    fn alias_on_label_id_tag_is_diagnosed() {
+        for src in [
+            "# Title {#my-label alias=other}\n",
+            "- item {#item-label alias=x}\n",
+            "::table {#tbl alias=x}\n@rows:\n  - a: [b]\n::\n",
+        ] {
+            let (_, diags) = parse(src);
+            assert!(
+                diags.iter().any(|d| d.kind == DiagKind::AliasWithoutUlid),
+                "expected AliasWithoutUlid for {src:?}, got {diags:?}"
+            );
+        }
+    }
+
+    /// ULID の id + alias は正当(3.1 の正規形)。AliasWithoutUlid を誤発火しないこと。
+    #[test]
+    fn alias_on_ulid_id_tag_is_not_diagnosed() {
+        let (_, diags) = parse("# Title {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=my-label}\n");
+        assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    /// sml-spec §3.2(2026-07-13 裁定): 属性行の id 値は裸トークンのみ。
+    #[test]
+    fn quoted_or_list_id_value_is_diagnosed() {
+        for src in ["[id=\"quoted\"]\nParagraph.\n", "[id=[a, b]]\nParagraph.\n"] {
+            let (_, diags) = parse(src);
+            assert!(
+                diags.iter().any(|d| d.kind == DiagKind::BadIdValue),
+                "expected BadIdValue for {src:?}, got {diags:?}"
+            );
+        }
+    }
+
+    /// 属性行の id 値が裸トークンでも字句不正なら BadKeyCharset(ULID は無条件で正当)。
+    #[test]
+    fn attr_id_label_charset_is_validated() {
+        let (_, diags) = parse("[id=bad.label]\nParagraph.\n");
+        assert!(diags.iter().any(|d| d.kind == DiagKind::BadKeyCharset), "{diags:?}");
+
+        let (_, diags) = parse("[id=01ARZ3NDEKTSV4RRFFQ69G5FAV]\nParagraph.\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let (_, diags) = parse("[id=good-label]\nParagraph.\n");
+        assert!(diags.is_empty(), "{diags:?}");
     }
 
     #[test]

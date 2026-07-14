@@ -168,7 +168,9 @@ fn run_fmt(args: FmtArgs) {
             }
 
             if args.check {
-                for patch in &out.patches {
+                // patches はオフセット降順(適用順)で持つが、人間向けの表示は
+                // 文書順(行番号昇順)にする(2026-07-13 裁定)。
+                for patch in out.patches.iter().rev() {
                     let (line, col) = Span::new(patch.at, patch.at + patch.delete).line_col(&src);
                     println!(
                         "{}:{}: delete {} byte(s), insert {:?}",
