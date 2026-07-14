@@ -44,12 +44,8 @@ pub(crate) struct PhysLine {
     pub(crate) full: Span,
 }
 
-/// `src` 全体を物理行に分割する。
-fn split_lines(src: &str) -> Vec<PhysLine> {
-    split_lines_range(src, Span::new(0, src.len()))
-}
-
-/// `range` に限定して物理行に分割する(フェンス本体など部分範囲の再走査に使う)。
+/// `range` に限定して物理行に分割する(フェンス本体・フロントマター後の本体など
+/// 部分範囲の再走査に使う)。
 pub(crate) fn split_lines_range(src: &str, range: Span) -> Vec<PhysLine> {
     let bytes = src.as_bytes();
     let mut lines = Vec::new();
@@ -177,9 +173,16 @@ fn classify(src: &str, line: &PhysLine) -> LineClass {
     LineClass::Paragraph
 }
 
-/// 層Aのエントリポイント。`src` 全体をブロック列に分割する。
-pub(crate) fn scan(src: &str, diags: &mut Vec<Diag>) -> Vec<RawBlock> {
-    let lines = split_lines(src);
+/// 層Aのエントリポイント。`src` の `start` バイトオフセット以降をブロック列に分割する。
+/// フロントマター(D12)を読み飛ばした残りを走査するために `parse` から呼ばれる
+/// (`start == 0` ならフロントマター無しの通常のファイル全体走査になる)。`start` は
+/// 行頭(またはファイル末尾)であることを前提とする。
+pub(crate) fn scan_from(src: &str, start: usize, diags: &mut Vec<Diag>) -> Vec<RawBlock> {
+    let lines = split_lines_range(src, Span::new(start, src.len()));
+    scan_lines(src, &lines, diags)
+}
+
+fn scan_lines(src: &str, lines: &[PhysLine], diags: &mut Vec<Diag>) -> Vec<RawBlock> {
     let n = lines.len();
     let mut i = 0usize;
     let mut blocks = Vec::new();
@@ -232,7 +235,7 @@ pub(crate) fn scan(src: &str, diags: &mut Vec<Diag>) -> Vec<RawBlock> {
                     let bound_attr_span = bound_attr_line.content;
                     let attr_full_start = bound_attr_line.full.start;
 
-                    let (consumed, mut block) = scan_one_block(src, &lines, next_idx, diags);
+                    let (consumed, mut block) = scan_one_block(src, lines, next_idx, diags);
                     block.full_span = Span::new(attr_full_start, block.full_span.end);
                     block.attr_line_span = Some(bound_attr_span);
                     blocks.push(block);
@@ -240,7 +243,7 @@ pub(crate) fn scan(src: &str, diags: &mut Vec<Diag>) -> Vec<RawBlock> {
                 }
             }
             _ => {
-                let (consumed, block) = scan_one_block(src, &lines, i, diags);
+                let (consumed, block) = scan_one_block(src, lines, i, diags);
                 blocks.push(block);
                 i += consumed;
             }
@@ -375,7 +378,7 @@ mod tests {
 
     fn no_diags(src: &str) -> Vec<RawBlock> {
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert!(diags.is_empty(), "unexpected diags: {diags:?}");
         blocks
     }
@@ -422,7 +425,7 @@ mod tests {
     fn heading_paragraph_and_gap_are_covered() {
         let src = "# Title\n\nHello world.\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert!(diags.is_empty());
         assert_eq!(blocks.len(), 2);
         assert_coverage(src, &blocks);
@@ -432,7 +435,7 @@ mod tests {
     fn unclosed_fence_reports_diag_and_consumes_to_eof() {
         let src = "::table {#x}\n@rows:\n  - a: [b]\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, DiagKind::UnclosedFence);
         assert_eq!(blocks.len(), 1);
@@ -444,7 +447,7 @@ mod tests {
     fn unclosed_code_fence_reports_diag() {
         let src = "```rust\nfn main() {}\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, DiagKind::UnclosedFence);
         assert_coverage(src, &blocks);
@@ -454,7 +457,7 @@ mod tests {
     fn orphan_attr_line_at_eof() {
         let src = "[id=foo]\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, DiagKind::OrphanAttrLine);
         assert_eq!(blocks.len(), 1);
@@ -465,7 +468,7 @@ mod tests {
     fn orphan_attr_line_before_blank() {
         let src = "[id=foo]\n\nParagraph.\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, DiagKind::OrphanAttrLine);
         assert_eq!(blocks.len(), 2);
@@ -476,7 +479,7 @@ mod tests {
     fn attr_line_binds_to_following_paragraph() {
         let src = "[id=foo]\nParagraph text.\n";
         let mut diags = Vec::new();
-        let blocks = scan(src, &mut diags);
+        let blocks = scan_from(src, 0, &mut diags);
         assert!(diags.is_empty());
         assert_eq!(blocks.len(), 1);
         assert!(blocks[0].attr_line_span.is_some());

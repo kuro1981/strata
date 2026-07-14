@@ -1112,12 +1112,17 @@ impl Parser {
                         if dest.starts_with("ref:") {
                             let key = dest["ref:".len()..].to_string();
                             let target_id = self.get_or_create_id(&key);
-                            result.push(Inline::Ref { to: target_id, rel: Rel::DependsOn });
+                            result.push(Inline::Ref {
+                                to: target_id,
+                                rel: Rel::DependsOn,
+                                coord: None,
+                                text: String::new(),
+                            });
                             self.edges_to_add.push((current_node_id, Rel::DependsOn, target_id, None));
                         } else if dest.starts_with("term:") {
                             let term_name = dest["term:".len()..].to_string();
                             let term_id = self.get_or_create_term_id(&term_name);
-                            result.push(Inline::Term { to: term_id });
+                            result.push(Inline::Term { to: term_id, text: String::new() });
                             self.edges_to_add.push((current_node_id, Rel::TermRef, term_id, None));
                         } else {
                             result.push(Inline::Text { s: format!("[{}](invalid-link:{})", label, dest) });

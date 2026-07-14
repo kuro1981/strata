@@ -29,6 +29,15 @@ fn fence_id_tag(src: &str) -> Option<strata_sml::IdTag> {
     }
 }
 
+fn code_fence_id_tag(src: &str) -> Option<strata_sml::IdTag> {
+    let out = parse(src);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    match &out.doc.blocks[0].kind {
+        BlockKind::CodeFence { id_tag, .. } => id_tag.clone(),
+        other => panic!("expected code fence, got {other:?}"),
+    }
+}
+
 // ---- 見出し -------------------------------------------------------------
 
 #[test]
@@ -117,4 +126,49 @@ fn fence_marker_ulid_alias() {
     let tag = fence_id_tag(&src).unwrap();
     assert!(matches!(tag.id, RefTarget::Ulid(_)));
     assert_eq!(tag.alias.as_deref(), Some("loss-formula"));
+}
+
+// ---- コードフェンス開始行(D10、2026-07-14 改定) --------------------------------
+
+#[test]
+fn code_fence_none() {
+    let src = "```rust\nfn main() {}\n```\n";
+    assert!(code_fence_id_tag(src).is_none());
+}
+
+#[test]
+fn code_fence_ulid() {
+    let u = Ulid::new().to_string();
+    let src = format!("```rust {{#{u}}}\nfn main() {{}}\n```\n");
+    let tag = code_fence_id_tag(&src).unwrap();
+    assert!(matches!(tag.id, RefTarget::Ulid(_)));
+    assert!(tag.alias.is_none());
+}
+
+#[test]
+fn code_fence_label() {
+    let src = "```rust {#my-snippet}\nfn main() {}\n```\n";
+    let tag = code_fence_id_tag(src).unwrap();
+    assert_eq!(tag.id, RefTarget::Label("my-snippet".into()));
+}
+
+#[test]
+fn code_fence_ulid_alias() {
+    let u = Ulid::new().to_string();
+    let src = format!("```rust {{#{u} alias=my-snippet}}\nfn main() {{}}\n```\n");
+    let tag = code_fence_id_tag(&src).unwrap();
+    assert!(matches!(tag.id, RefTarget::Ulid(_)));
+    assert_eq!(tag.alias.as_deref(), Some("my-snippet"));
+}
+
+/// id タグの有無に関わらず `lang` はタグより前のテキストから正しく取り出せること。
+#[test]
+fn code_fence_lang_excludes_id_tag() {
+    let u = Ulid::new().to_string();
+    let src = format!("```rust {{#{u}}}\nfn main() {{}}\n```\n");
+    let out = parse(&src);
+    match &out.doc.blocks[0].kind {
+        BlockKind::CodeFence { lang, .. } => assert_eq!(lang, "rust"),
+        other => panic!("expected code fence, got {other:?}"),
+    }
 }

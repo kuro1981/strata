@@ -35,6 +35,11 @@ pub enum DiagKind {
     InconsistentIndent,
     /// インライン参照のスキームが `ref/term/table/fig/math/cell` のいずれでもない。
     UnknownScheme,
+    /// フロントマター(sml-spec §2.1、D12)の `key: value` 行のキーが `id` / `title`
+    /// のいずれでもない(v0 は「出たら足す」方針)。
+    UnknownFrontmatterKey,
+    /// フロントマターの閉じ `---` 単独行が見つからずファイル末尾に到達した。
+    UnclosedFrontmatter,
 }
 
 /// 1件の診断。位置(スパン)と人間可読メッセージを持つ。

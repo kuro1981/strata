@@ -173,7 +173,8 @@ pub fn norm_block(src: &str, b: &SmlBlock) -> NBlock {
             fence_attrs: fb.fence_attrs.iter().map(norm_attr_line).collect(),
             body: norm_fence_body(src, &fb.body),
         },
-        BlockKind::CodeFence { lang, body } => {
+        // id_tag は ID 情報なので正規化構造では無視する(他ブロックの id_tag と対称)。
+        BlockKind::CodeFence { lang, body, id_tag: _ } => {
             NBlockKind::CodeFence { lang: lang.clone(), body: body.slice(src).to_string() }
         }
     };

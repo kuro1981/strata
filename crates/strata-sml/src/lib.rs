@@ -18,6 +18,7 @@ pub mod ast;
 pub mod block;
 pub mod error;
 pub mod fmt;
+pub(crate) mod frontmatter;
 pub mod inline;
 pub mod scan;
 pub mod span;
@@ -37,14 +38,15 @@ pub struct ParseOutput {
     pub diags: Vec<Diag>,
 }
 
-/// 公開API: 層A(スキャン)→ 層B(ブロック内パース)を統率する。
+/// 公開API: フロントマター(D12)→ 層A(スキャン)→ 層B(ブロック内パース)を統率する。
 ///
 /// `inline`/`table` は層Bの中でもプレースホルダ経由(WP1/WP2時点)。
 pub fn parse(src: &str) -> ParseOutput {
     let mut diags = Vec::new();
-    let raw_blocks = scan::scan(src, &mut diags);
+    let (frontmatter, body_start) = frontmatter::parse_frontmatter(src, &mut diags);
+    let raw_blocks = scan::scan_from(src, body_start, &mut diags);
     let blocks = block::build_blocks(src, raw_blocks, &mut diags);
-    let doc = SmlDocument { blocks, src_len: src.len() };
+    let doc = SmlDocument { blocks, src_len: src.len(), frontmatter };
     ParseOutput { doc, diags }
 }
 

@@ -23,6 +23,8 @@ struct Cli {
 enum Command {
     /// Format an SML file in place (ID re-injection formatter)
     Fmt(FmtArgs),
+    /// Build an SML file into a canonical graph (JSON)
+    Build(BuildArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -33,6 +35,16 @@ struct FmtArgs {
     /// Do not write; exit 1 if the file needs formatting, 0 otherwise
     #[arg(long)]
     check: bool,
+}
+
+#[derive(ClapArgs, Debug)]
+struct BuildArgs {
+    /// SML file to build
+    file: PathBuf,
+
+    /// Write the graph JSON to this file instead of stdout
+    #[arg(short, long)]
+    output: Option<PathBuf>,
 }
 
 #[derive(ClapArgs, Debug)]
@@ -60,6 +72,7 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Some(Command::Fmt(fmt_args)) => run_fmt(fmt_args),
+        Some(Command::Build(build_args)) => run_build(build_args),
         None => run_legacy(cli.args),
     }
 }
@@ -186,6 +199,110 @@ fn run_fmt(args: FmtArgs) {
             }
             std::process::exit(0);
         }
+    }
+}
+
+/// `strata-cli build` サブコマンド(docs/sml-build-m3-handoff.md D-B6)。
+fn run_build(args: BuildArgs) {
+    let src = match fs::read_to_string(&args.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    match strata_build::build(&src) {
+        Err(errors) => {
+            // 全件収集済みのエラーを「行:列: 種別: メッセージ」で全件出力する(D13 同様、
+            // 最初の1件で止めない)。ファイルには一切触れない。
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => {
+            let json = match serde_json::to_string_pretty(&out) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("Failed to serialize build output: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            match args.output {
+                Some(path) => {
+                    if let Err(e) = write_atomic(&path, &json) {
+                        eprintln!("Failed to write output file: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    println!("{}", json);
+                }
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
+/// `BuildError` 1件を「行:列: 種別: メッセージ」形式の行(複数になりうる)に変換する。
+///
+/// `Parse` は既存の `fmt` の Diag 表示と同形式(`{line}:{col}: {kind:?}: {msg}`)。
+/// 他の variant は `span` を `line_col` で変換して同じ形式に揃える。
+///
+/// 2点、仕様(sml-build-m3-handoff.md D-B6)に明記が無く裁量で決めた箇所:
+/// - `MissingId` は `strata_build::BuildError` 自体にメッセージを持たないため、
+///   ここで「strata fmt を先に実行してください」という案内文言を組み立てている。
+/// - `DuplicateAlias` は1エラーに複数 `span`(全定義箇所)を持つ。全定義箇所を
+///   stderr に出すため、spans の数だけ行を生成する(1エラー=1行ではなくなる)。
+/// - `Invariant` は build 後のグラフ検証結果であり `strata_sml::Span`(ソース位置)を
+///   持たない。行:列の代わりに `-:-` を用いる。
+fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
+    use strata_build::BuildError as E;
+
+    fn at(span: strata_sml::Span, src: &str) -> (usize, usize) {
+        span.line_col(src)
+    }
+
+    match e {
+        E::Parse(diag) => {
+            let (line, col) = at(diag.span, src);
+            vec![format!("{}:{}: {:?}: {}", line, col, diag.kind, diag.msg)]
+        }
+        E::MissingId { span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: MissingId: このブロックには ID が付与されていません。`strata fmt` を先に実行してください。",
+                line, col
+            )]
+        }
+        E::UnresolvedAlias { alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!("{}:{}: UnresolvedAlias: 参照先 '{}' が見つかりません。", line, col, alias)]
+        }
+        E::DuplicateAlias { alias, spans } => spans
+            .iter()
+            .map(|span| {
+                let (line, col) = at(*span, src);
+                format!("{}:{}: DuplicateAlias: エイリアス '{}' が複数箇所で定義されています。", line, col, alias)
+            })
+            .collect(),
+        E::BadFigure { span, msg } => {
+            let (line, col) = at(*span, src);
+            vec![format!("{}:{}: BadFigure: {}", line, col, msg)]
+        }
+        E::Math { span, msg } => {
+            let (line, col) = at(*span, src);
+            vec![format!("{}:{}: Math: {}", line, col, msg)]
+        }
+        E::RefTypeMismatch { span, msg } => {
+            let (line, col) = at(*span, src);
+            vec![format!("{}:{}: RefTypeMismatch: {}", line, col, msg)]
+        }
+        E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }
 }
 

@@ -1,0 +1,200 @@
+//! Pass 1: エイリアス解決の第1パス(sml-build-m3-handoff.md D-B5)。
+//!
+//! 全ブロック(+リスト項目)を走査し、「ULID 登録」と「alias → ULID 表」を構築する。
+//! ここで収集した情報を Pass 2(`convert.rs`)が消費する。
+//!
+//! - alias の重複 → `DuplicateAlias`(全件収集)
+//! - ULID 未付与(`RefTarget::Label` の id、または ID を持たないブロック)→ `MissingId`
+//!
+//! ブロックの Span をキーに `Registration` を引けるようにしておくことで、Pass 2 は
+//! 同じ木を辿るだけで(再解決せずに)各ブロック自身の NodeId と種別を取得できる。
+
+use std::collections::HashMap;
+
+use strata_sml::{AttrLine, AttrValue, BlockKind, IdTag, RefTarget, SmlDocument, Span};
+use strata_core::NodeId;
+use ulid::Ulid;
+
+use crate::error::BuildError;
+
+/// canonical 上でこのブロックがどのノード型になるか(scheme 検証用の粗い分類)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeKindTag {
+    Document,
+    Section,
+    Para,
+    List,
+    Table,
+    Math,
+    Figure,
+    Code,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Registration {
+    pub id: NodeId,
+}
+
+pub(crate) struct Registry {
+    /// ブロック(またはリスト項目)の Span → 解決済み(またはプレースホルダの)登録情報。
+    pub by_span: HashMap<Span, Registration>,
+    /// alias → NodeId。重複がある場合は最初の定義を採用する(重複自体は別途
+    /// `DuplicateAlias` として報告されるので、どちらを採用しても最終結果は Err)。
+    pub alias_table: HashMap<String, NodeId>,
+    /// NodeId → 種別。scheme(table:/fig:/math:/cell:)の対象ノード型検証に使う。
+    pub node_kind: HashMap<NodeId, NodeKindTag>,
+    /// フロントマターが有効な ULID の id を持つ場合のみ `Some`。
+    pub document_id: Option<NodeId>,
+}
+
+pub(crate) fn build_registry(doc: &SmlDocument, errors: &mut Vec<BuildError>) -> Registry {
+    let mut reg = Registry {
+        by_span: HashMap::new(),
+        alias_table: HashMap::new(),
+        node_kind: HashMap::new(),
+        document_id: None,
+    };
+    let mut alias_defs: HashMap<String, Vec<Span>> = HashMap::new();
+
+    if let Some(fm) = &doc.frontmatter {
+        match &fm.id {
+            Some((RefTarget::Ulid(u), _)) => {
+                reg.document_id = Some(NodeId(*u));
+                reg.node_kind.insert(NodeId(*u), NodeKindTag::Document);
+            }
+            _ => {
+                // `RefTarget::Label` はフロントマターパーサが既に `BadIdValue` を積んで
+                // いるが、build 視点では「ULID 未付与」でもあるため MissingId も積む。
+                // id 自体が無いケースも同様(fmt が常に注入するはずの id が無い)。
+                errors.push(BuildError::MissingId { span: fm.open_span });
+            }
+        }
+    }
+
+    for block in &doc.blocks {
+        register_block(block, &mut reg, &mut alias_defs, errors);
+    }
+
+    for (alias, spans) in alias_defs {
+        if spans.len() > 1 {
+            errors.push(BuildError::DuplicateAlias { alias, spans });
+        }
+    }
+
+    reg
+}
+
+fn register_block(
+    block: &strata_sml::SmlBlock,
+    reg: &mut Registry,
+    alias_defs: &mut HashMap<String, Vec<Span>>,
+    errors: &mut Vec<BuildError>,
+) {
+    match &block.kind {
+        BlockKind::Heading { id_tag, .. } => {
+            register_line_type(block.span, id_tag, NodeKindTag::Section, reg, alias_defs, errors);
+        }
+        BlockKind::Paragraph { .. } => {
+            register_prose(block.span, &block.attrs, NodeKindTag::Para, reg, alias_defs, errors);
+        }
+        BlockKind::List { items, .. } => {
+            register_prose(block.span, &block.attrs, NodeKindTag::List, reg, alias_defs, errors);
+            for item in items {
+                register_line_type(item.span, &item.id_tag, NodeKindTag::Para, reg, alias_defs, errors);
+            }
+        }
+        BlockKind::Fence(fb) => {
+            let kind = match fb.fence_kind {
+                strata_sml::FenceKind::Table => NodeKindTag::Table,
+                strata_sml::FenceKind::Math => NodeKindTag::Math,
+                strata_sml::FenceKind::Figure => NodeKindTag::Figure,
+            };
+            register_line_type(block.span, &fb.id_tag, kind, reg, alias_defs, errors);
+        }
+        BlockKind::CodeFence { id_tag, .. } => {
+            register_line_type(block.span, id_tag, NodeKindTag::Code, reg, alias_defs, errors);
+        }
+    }
+}
+
+/// 行型ブロック(見出し・フェンス・コードフェンス・リスト項目)の ID 登録。
+fn register_line_type(
+    span_for_missing: Span,
+    id_tag: &Option<IdTag>,
+    kind: NodeKindTag,
+    reg: &mut Registry,
+    alias_defs: &mut HashMap<String, Vec<Span>>,
+    errors: &mut Vec<BuildError>,
+) {
+    match id_tag {
+        Some(tag) => match &tag.id {
+            RefTarget::Ulid(u) => {
+                let id = NodeId(*u);
+                reg.by_span.insert(span_for_missing, Registration { id });
+                reg.node_kind.insert(id, kind);
+                if let Some(alias) = &tag.alias {
+                    alias_defs.entry(alias.clone()).or_default().push(tag.inner_span);
+                    reg.alias_table.entry(alias.clone()).or_insert(id);
+                }
+            }
+            RefTarget::Label(_) => {
+                errors.push(BuildError::MissingId { span: tag.inner_span });
+                reg.by_span.insert(span_for_missing, placeholder());
+            }
+        },
+        None => {
+            errors.push(BuildError::MissingId { span: span_for_missing });
+            reg.by_span.insert(span_for_missing, placeholder());
+        }
+    }
+}
+
+/// プローズブロック(段落・リスト全体)の ID 登録。id/alias は前置属性行から読む。
+fn register_prose(
+    span: Span,
+    attrs: &Option<AttrLine>,
+    kind: NodeKindTag,
+    reg: &mut Registry,
+    alias_defs: &mut HashMap<String, Vec<Span>>,
+    errors: &mut Vec<BuildError>,
+) {
+    let id_entry = attrs.as_ref().and_then(|al| al.entries.iter().find(|(k, _, _)| k == "id"));
+
+    let resolved = match id_entry {
+        Some((_, AttrValue::Single(s), entry_span)) => match s.parse::<Ulid>() {
+            Ok(u) => {
+                let id = NodeId(u);
+                reg.node_kind.insert(id, kind);
+                Some(id)
+            }
+            Err(_) => {
+                // 非 ULID ラベル(ドラフト段階)。fmt 未実行の合図。
+                errors.push(BuildError::MissingId { span: *entry_span });
+                None
+            }
+        },
+        // `[id="..."]` / `[id=[a, b]]` は既にパーサが `BadIdValue` を積んでいる
+        // (`BuildError::Parse` として収集済み)。ここで MissingId を重ねて出すと
+        // 同じ問題に対して2種類のエラーが出て紛らわしいので、追加の診断はしない。
+        Some((_, AttrValue::Quoted(_) | AttrValue::List(_), _)) => None,
+        None => {
+            errors.push(BuildError::MissingId { span });
+            None
+        }
+    };
+
+    let id = resolved.unwrap_or_else(NodeId::new);
+    reg.by_span.insert(span, Registration { id });
+
+    if resolved.is_some()
+        && let Some((_, AttrValue::Single(alias), alias_span)) =
+            attrs.as_ref().and_then(|al| al.entries.iter().find(|(k, _, _)| k == "alias"))
+    {
+        alias_defs.entry(alias.clone()).or_default().push(*alias_span);
+        reg.alias_table.entry(alias.clone()).or_insert(id);
+    }
+}
+
+fn placeholder() -> Registration {
+    Registration { id: NodeId::new() }
+}

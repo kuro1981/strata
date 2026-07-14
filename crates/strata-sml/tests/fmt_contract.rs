@@ -1,9 +1,10 @@
-//! WP-F2: fmt の契約テスト(docs/sml-fmt-m2-handoff.md D-F5、sml-spec.md §8.1)。
+//! WP-F2: fmt の契約テスト(docs/sml-fmt-m2-handoff.md D-F5、sml-spec.md §8.1、
+//! docs/sml-build-m3-handoff.md WP-B2)。
 //!
 //! D-F5 の4契約を機械化する:
 //!
-//! 1. **ゴールデン完全一致**: 固定 ULID 16個を文書順に注入した `format_with(draft)` が
-//!    formatted fixture とバイト完全一致
+//! 1. **ゴールデン完全一致**: 固定 ULID 18個(フロントマター生成込み、D-B4)を
+//!    文書順に注入した `format_with(draft)` が formatted fixture とバイト完全一致
 //! 2. **冪等性**: `format(formatted)` のパッチが0件。任意入力でも
 //!    `format(format(x).text).patches.is_empty()`
 //! 3. **挿入のみ**: 全パッチが「delete == 0」または「削除範囲が元テキストの
@@ -13,29 +14,31 @@
 //! 4. **意味保存**: `parse(format(x).text)` と `parse(x)` が ID 無視で同型
 //!    (`tests/common/mod.rs` の正規化関数で比較)
 //!
-//! 追加プロパティ(ハンドオフ WP-F2 指定):
+//! 追加プロパティ(ハンドオフ WP-F2 指定、WP-B2 で拡張):
 //! - fmt 後のテキストを再パースして diags がゼロ
-//! - fmt 後の全ブロックが ULID の ID を持つ(コードフェンスを除く。リストは全項目、
-//!   段落は属性行の id、見出し・フェンスは IdTag)
+//! - fmt 後の**全ブロック**(コードフェンスも含む。D10/D-B4 で除外を廃止)が ULID の
+//!   ID を持つ(リストは全項目 + リスト全体の前置属性行〈D11〉、段落は属性行の id、
+//!   見出し・フェンス・コードフェンスは IdTag)
+//! - fmt 後の文書は必ずフロントマターを持ち、その id が ULID である(D12/D-B4)
 
 mod common;
 
 use common::{norm_doc, read_doc};
-use strata_sml::{format, format_with, AttrValue, BlockKind, RefTarget, SmlDocument};
+use strata_sml::{format, format_with, AttrValue, BlockKind, RefTarget, SmlBlock, SmlDocument};
 use ulid::Ulid;
 
 // ---- ヘルパ --------------------------------------------------------------------
 
-/// draft fixture の16ブロックに文書順で発行される固定 ULID 列
-/// (`01J2T8Z0000000000000000000` 〜 `01J2T8ZF000000000000000000`。
-/// 末尾16文字目が Crockford Base32 の 0-9,A-F。handoff D-F5 参照)。
+/// draft fixture の18ブロック(フロントマター生成込み)に文書順で発行される
+/// 固定 ULID 列(`01J2T8Z0000000000000000000` 〜 `01J2T8ZH000000000000000000`。
+/// 末尾17文字目が Crockford Base32 の 0-9,A-H。sml-build-m3-handoff.md WP-B2 参照)。
 fn golden_idgen() -> impl FnMut() -> Ulid {
-    let ulids: Vec<Ulid> = "0123456789ABCDEF"
+    let ulids: Vec<Ulid> = "0123456789ABCDEFGH"
         .chars()
         .map(|c| format!("01J2T8Z{c}000000000000000000").parse().expect("valid crockford ulid"))
         .collect();
     let mut it = ulids.into_iter();
-    move || it.next().expect("golden fixture needs exactly 16 ulids")
+    move || it.next().expect("golden fixture needs exactly 18 ulids")
 }
 
 /// 見出し / リスト / 段落 / フェンス / コードフェンス / 属性行を横断する自作サンプル。
@@ -235,10 +238,29 @@ fn contract4_arbitrary_input_semantics_preserved_by_fmt() {
     }
 }
 
-// ---- 追加プロパティ: fmt 後は diags ゼロ & 全ブロックが ULID を持つ -----------------
+// ---- 追加プロパティ: fmt 後は diags ゼロ & 全ブロック(+フロントマター)が ULID を持つ --
 
-/// fmt 後のドキュメントで、コードフェンスを除く全ブロックが ULID の ID を持つことを
-/// 検証する。リストは全項目、段落は属性行の `id` エントリ、見出し・フェンスは IdTag。
+/// ブロック前置属性行(段落・リスト全体)の `id` エントリが ULID であることを検証する
+/// (D11: リストも段落と同じ規則)。
+fn assert_attr_line_id_is_ulid(block: &SmlBlock, i: usize, kind_label: &str) {
+    let attrs =
+        block.attrs.as_ref().unwrap_or_else(|| panic!("{kind_label} #{i} has no attr line after fmt"));
+    let (_, value, _) = attrs
+        .entries
+        .iter()
+        .find(|(k, _, _)| k == "id")
+        .unwrap_or_else(|| panic!("{kind_label} #{i} attr line has no id entry after fmt"));
+    match value {
+        AttrValue::Single(v) => {
+            assert!(v.parse::<Ulid>().is_ok(), "{kind_label} #{i} id is not a ULID after fmt: {v:?}")
+        }
+        other => panic!("{kind_label} #{i} id is not a bare token after fmt: {other:?}"),
+    }
+}
+
+/// fmt 後のドキュメントで、**全ブロック**(コードフェンスも含む。D10/D-B4で除外を廃止)が
+/// ULID の ID を持つことを検証する。リストは全項目に加えリスト全体の前置属性行 `id`
+/// (D11)、段落は属性行の `id` エントリ、見出し・フェンス・コードフェンスは IdTag。
 fn assert_all_blocks_have_ulid_ids(doc: &SmlDocument) {
     for (i, block) in doc.blocks.iter().enumerate() {
         match &block.kind {
@@ -259,7 +281,20 @@ fn assert_all_blocks_have_ulid_ids(doc: &SmlDocument) {
                     tag.id
                 );
             }
+            // コードフェンス開始行も行型ブロック(D10、2026-07-14 改定)。
+            BlockKind::CodeFence { id_tag, .. } => {
+                let tag = id_tag
+                    .as_ref()
+                    .unwrap_or_else(|| panic!("code fence #{i} has no id tag after fmt"));
+                assert!(
+                    matches!(tag.id, RefTarget::Ulid(_)),
+                    "code fence #{i} id is not a ULID after fmt: {:?}",
+                    tag.id
+                );
+            }
             BlockKind::List { items, .. } => {
+                // リスト全体の前置属性行(D11)。
+                assert_attr_line_id_is_ulid(block, i, "list");
                 for (j, item) in items.iter().enumerate() {
                     let tag = item
                         .id_tag
@@ -272,28 +307,17 @@ fn assert_all_blocks_have_ulid_ids(doc: &SmlDocument) {
                     );
                 }
             }
-            BlockKind::Paragraph { .. } => {
-                let attrs = block
-                    .attrs
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("paragraph #{i} has no attr line after fmt"));
-                let (_, value, _) = attrs
-                    .entries
-                    .iter()
-                    .find(|(k, _, _)| k == "id")
-                    .unwrap_or_else(|| panic!("paragraph #{i} attr line has no id entry after fmt"));
-                match value {
-                    AttrValue::Single(v) => assert!(
-                        v.parse::<Ulid>().is_ok(),
-                        "paragraph #{i} id is not a ULID after fmt: {v:?}"
-                    ),
-                    other => panic!("paragraph #{i} id is not a bare token after fmt: {other:?}"),
-                }
-            }
-            // コードフェンスは ID を持たない(sml-spec §10 保留)。
-            BlockKind::CodeFence { .. } => {}
+            BlockKind::Paragraph { .. } => assert_attr_line_id_is_ulid(block, i, "paragraph"),
         }
     }
+}
+
+/// fmt 後のドキュメントが必ずフロントマターを持ち、その `id` が ULID であることを
+/// 検証する(D12/D-B4: fmt 済みファイルは常にフロントマターを持つ)。
+fn assert_frontmatter_has_ulid_id(doc: &SmlDocument) {
+    let fm = doc.frontmatter.as_ref().expect("document has no frontmatter after fmt");
+    let (target, _) = fm.id.as_ref().expect("frontmatter has no id after fmt");
+    assert!(matches!(target, RefTarget::Ulid(_)), "frontmatter id is not a ULID after fmt: {target:?}");
 }
 
 #[test]
@@ -321,5 +345,17 @@ fn property_all_blocks_have_ulid_ids_after_fmt() {
         let reparsed = strata_sml::parse(&out.text);
         assert!(reparsed.diags.is_empty(), "{:?}", reparsed.diags);
         assert_all_blocks_have_ulid_ids(&reparsed.doc);
+    }
+}
+
+#[test]
+fn property_document_has_frontmatter_with_ulid_id_after_fmt() {
+    let mut inputs: Vec<String> = samples().iter().map(|s| s.to_string()).collect();
+    inputs.push(read_doc("sml_example_draft.sml"));
+    for src in &inputs {
+        let out = fmt_prod(src);
+        let reparsed = strata_sml::parse(&out.text);
+        assert!(reparsed.diags.is_empty(), "{:?}", reparsed.diags);
+        assert_frontmatter_has_ulid_id(&reparsed.doc);
     }
 }

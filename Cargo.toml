@@ -4,4 +4,4 @@ resolver = "2"
 
 
 
-members = ["crates/strata-core", "crates/tex2math", "crates/strata-vault", "crates/strata-html", "crates/strata-typst", "crates/strata-cli", "crates/strata-sml"]
+members = ["crates/strata-core", "crates/tex2math", "crates/strata-vault", "crates/strata-html", "crates/strata-typst", "crates/strata-cli", "crates/strata-sml", "crates/strata-build"]

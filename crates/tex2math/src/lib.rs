@@ -262,6 +262,14 @@ impl Parser {
                 Ok(MathNode::Text { s: inner })
             }
             "left" => self.parse_left_right(),
+            "hat" => {
+                let base = self.parse_group("\\hat body")?;
+                Ok(MathNode::UnderOver {
+                    base: Box::new(base),
+                    under: None,
+                    over: Some(Box::new(MathNode::Op { v: "^".into() })),
+                })
+            }
             other => {
                 if let Some(sym) = greek(other) {
                     Ok(MathNode::Ident { v: sym.to_string() })
@@ -547,6 +555,35 @@ mod tests {
         assert!(matches!(parse(r"\frac{a}"), Err(ParseError::ExpectedGroup { .. })));
         // 閉じられていない { → グループ内 parse_row が尽きて UnexpectedEnd
         assert!(matches!(parse(r"{a"), Err(ParseError::UnexpectedEnd { .. })));
+    }
+
+    #[test]
+    fn hat_accent_wraps_base_in_underover() {
+        assert_eq!(
+            parse(r"\hat{y}").unwrap(),
+            MathNode::UnderOver {
+                base: Box::new(ident("y")),
+                under: None,
+                over: Some(Box::new(op("^"))),
+            }
+        );
+    }
+
+    #[test]
+    fn hat_with_trailing_subscript() {
+        // \hat{y}_i: \hat{y} は1個の atom として \hat が消費し、続く `_i` は
+        // postfix として \hat の結果(UnderOver)に付く。normalize は UnderOver を
+        // 素通り(構造を変えず内部を再帰的に正規化するだけ)することも併せて確認する。
+        let got = parse_normalized(r"\hat{y}_i").unwrap();
+        let expected = MathNode::Sub {
+            base: Box::new(MathNode::UnderOver {
+                base: Box::new(ident("y")),
+                under: None,
+                over: Some(Box::new(op("^"))),
+            }),
+            sub: Box::new(ident("i")),
+        };
+        assert_eq!(got, expected);
     }
 
     #[test]

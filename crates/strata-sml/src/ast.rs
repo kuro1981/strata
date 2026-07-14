@@ -21,6 +21,31 @@ pub struct SmlDocument {
     pub blocks: Vec<SmlBlock>,
     /// 元テキストの全長(バイト)。スパン被覆不変条件の検証に使う。
     pub src_len: usize,
+    /// ファイル先頭(オフセット0)の `---` フロントマター(sml-spec §2.1、D12)。
+    /// 無ければ `None`(フォレスト。Document ノードは build が作らない)。
+    pub frontmatter: Option<Frontmatter>,
+}
+
+/// フロントマター(sml-spec §2.1)。ファイル先頭オフセット0の `---` 単独行から
+/// 次の `---` 単独行までを YAML 風の `key: value` 行として読む。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Frontmatter {
+    /// フロントマター全体のスパン(開き `---` 行の先頭 = 0 から、閉じ `---` 行の末尾
+    /// (改行を含む)まで)。閉じが無ければファイル末尾まで(`UnclosedFrontmatter`)。
+    pub span: Span,
+    /// 開き `---` 単独行の内容スパン(改行を含まない)。fmt が「id 行の挿入位置 =
+    /// 開き `---` 行の直後」を計算するために使う(挿入位置は `open_span.end` の次の
+    /// 改行の直後)。
+    pub open_span: Span,
+    /// `id: <値>` の解決前の値と、その値トークンのスパン(診断位置に使う)。
+    /// 値が ULID でなければ `BadIdValue`(sml-spec §2.1、フロントマターにラベル/alias
+    /// の置換系は持ち込まない)。キー自体が無ければ `None`。
+    pub id: Option<(RefTarget, Span)>,
+    /// `title: <値>` の生文字列。キーが無ければ `None`。
+    pub title: Option<String>,
+    /// 閉じ `---` 単独行の内容スパン(改行を含まない)。ファイル末尾まで閉じが
+    /// 見つからなかった場合はファイル末尾の空スパン(`UnclosedFrontmatter` と併発)。
+    pub close_span: Span,
 }
 
 /// 層Aが確定させるブロック単位。前置属性行を含む全体スパンを持つ。
@@ -42,7 +67,9 @@ pub enum BlockKind {
     List { ordered: bool, items: Vec<ListItem> },
     /// `::table` / `::math` / `::figure`。
     Fence(FenceBlock),
-    CodeFence { lang: String, body: Span },
+    /// コードフェンス(```` ```lang ````)。開始行末尾に `{#id}` を書ける(D10、
+    /// 2026-07-14 改定。行型ブロックとして扱う — sml-spec §2)。
+    CodeFence { lang: String, body: Span, id_tag: Option<IdTag> },
 }
 
 /// リスト項目。行末に自身の `{#id}` を持ちうる(行型ブロック、sml-spec §3.3)。

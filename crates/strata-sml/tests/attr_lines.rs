@@ -1,7 +1,7 @@
 //! 属性行のテスト(単一値/リスト値/引用符値/孤立/DuplicateId/BadKeyCharset)
 //! (sml-parser-m1-handoff.md WP2 受け入れ条件)。
 
-use strata_sml::{parse, AttrValue, DiagKind};
+use strata_sml::{parse, AttrValue, BlockKind, DiagKind, RefTarget};
 
 #[test]
 fn single_value() {
@@ -84,19 +84,44 @@ fn id_not_allowed_on_fence_without_own_id_tag() {
     assert!(!out.diags.iter().any(|d| d.kind == DiagKind::DuplicateId), "{:?}", out.diags);
 }
 
+// ---- D11(2026-07-14 改定): リスト全体はプローズ扱い、前置属性行の id= を許す ------
+//
+// 項目の `{#id}`(行型)とリスト全体の `[id=...]`(プローズ属性行)は別エンティティ
+// なので併記可(DuplicateId にも IdNotAllowedHere にもならない)。
+
 #[test]
-fn id_not_allowed_on_list_even_when_item_has_own_id_tag() {
-    // リスト全体を束縛する属性行の id= は、個々の項目の {#...} の有無に関わらず
-    // 常に IdNotAllowedHere(項目とブロック単位の attrs は直接対応しないため)。
+fn id_allowed_on_list_even_when_item_has_own_id_tag() {
     let out = parse("[id=foo]\n- one {#item-1}\n- two\n");
-    assert!(out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+    assert!(!out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
     assert!(!out.diags.iter().any(|d| d.kind == DiagKind::DuplicateId), "{:?}", out.diags);
 }
 
 #[test]
-fn id_not_allowed_on_list_without_any_item_id_tag() {
+fn id_allowed_on_list_without_any_item_id_tag() {
     let out = parse("[id=foo]\n- one\n- two\n");
-    assert!(out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+    assert!(!out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+}
+
+/// リスト全体の `[id=...]` と項目の `{#id}` は別エンティティなので独立に共存する
+/// (どちらも正しくパースされ、互いに干渉しない)。
+#[test]
+fn list_id_and_item_id_tag_coexist_as_independent_entities() {
+    let out = parse("[id=list-label]\n- one {#item-label}\n- two\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+
+    let block = &out.doc.blocks[0];
+    let attrs = block.attrs.as_ref().expect("expected attr line on list block");
+    assert_eq!(attrs.entries[0].0, "id");
+    assert_eq!(attrs.entries[0].1, AttrValue::Single("list-label".to_string()));
+
+    match &block.kind {
+        BlockKind::List { items, .. } => {
+            let tag = items[0].id_tag.as_ref().expect("expected item id tag");
+            assert_eq!(tag.id, RefTarget::Label("item-label".to_string()));
+            assert!(items[1].id_tag.is_none());
+        }
+        other => panic!("expected list, got {other:?}"),
+    }
 }
 
 #[test]
@@ -106,6 +131,36 @@ fn duplicate_id_still_wins_over_id_not_allowed_when_both_tags_present() {
     let out = parse("[id=foo]\n# Title {#bar}\n");
     assert!(out.diags.iter().any(|d| d.kind == DiagKind::DuplicateId), "{:?}", out.diags);
     assert!(!out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+}
+
+// ---- D10(2026-07-14 改定): コードフェンスは行型ブロック(前置属性行の id= は不可) --
+
+#[test]
+fn id_not_allowed_on_code_fence_without_own_id_tag() {
+    let out = parse("[id=foo]\n```rust\nfn main() {}\n```\n");
+    assert!(out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+    assert!(!out.diags.iter().any(|d| d.kind == DiagKind::DuplicateId), "{:?}", out.diags);
+}
+
+#[test]
+fn duplicate_id_on_code_fence_with_own_id_tag() {
+    let out = parse("[id=foo]\n```rust {#bar}\nfn main() {}\n```\n");
+    assert!(out.diags.iter().any(|d| d.kind == DiagKind::DuplicateId), "{:?}", out.diags);
+    assert!(!out.diags.iter().any(|d| d.kind == DiagKind::IdNotAllowedHere), "{:?}", out.diags);
+}
+
+/// D11(2026-07-14 改定): `check_id_value` の対象にリストが追加された。
+/// リストの前置属性行 `id=` にも段落と同じ値検証(裸トークンのみ・字句制約)が働く。
+#[test]
+fn list_id_value_is_validated_like_paragraph() {
+    let out = parse("[id=\"quoted\"]\n- one\n- two\n");
+    assert!(out.diags.iter().any(|d| d.kind == DiagKind::BadIdValue), "{:?}", out.diags);
+
+    let out = parse("[id=bad.label]\n- one\n- two\n");
+    assert!(out.diags.iter().any(|d| d.kind == DiagKind::BadKeyCharset), "{:?}", out.diags);
+
+    let out = parse("[id=good-label]\n- one\n- two\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
 }
 
 #[test]

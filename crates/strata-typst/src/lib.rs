@@ -136,6 +136,11 @@ impl<'a> TypstRenderer<'a> {
             NodePayload::Figure(f) => {
                 Ok(format!("// Figure: {:?}\n", f))
             }
+            NodePayload::Document(_) => {
+                // 文書ルート(D12)。M3 時点では Typst レンダラの接続対象外
+                // (strata-build のスコープ境界)。フォールバックとして無視する。
+                Ok(String::new())
+            }
         }
     }
 
@@ -172,7 +177,7 @@ impl<'a> TypstRenderer<'a> {
                     };
                     out.push_str(&format!("#link(<anchor-{}>)[{}]", to.0, label));
                 }
-                Inline::Term { to } => {
+                Inline::Term { to, .. } => {
                     if let Some(target) = self.graph.nodes.get(to) {
                         if let NodePayload::Term(t) = &target.payload {
                             out.push_str(&format!("*{}*", typst_escape(&t.name)));
@@ -364,6 +369,7 @@ impl<'a> TypstRenderer<'a> {
                         };
                         format!("#link(<anchor-{}>)[{}]", to.0, label)
                     }
+                    Some(CellValue::Quantity { v, unit }) => format!("{} {}", v, typst_escape(unit)),
                     Some(CellValue::Empty) | None => "".to_string(),
                 };
 

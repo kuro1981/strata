@@ -74,6 +74,15 @@ pub enum NodePayload {
     /// §2.4: 段落より細かいスパンを昇格させたノード。被参照・トランスクルージョン可。
     Anchor(Anchor),
     Value(Value),
+    /// フロントマターに対応する文書ルート(D12)。トップレベルブロックを contains する。
+    Document(Document),
+}
+
+/// フロントマターに対応する文書ルートノード(§9-5)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -148,10 +157,19 @@ pub enum Inline {
     Ref {
         to: NodeId,
         rel: Rel,
+        /// セル参照(`cell:`)の座標。他の参照種別では None(§5.3, §9-2)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        coord: Option<CellCoord>,
+        /// 表示テキスト(ロスレス原則。§9-7)。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
     },
     /// 用語使用 → term ノードへのリンク。
     Term {
         to: NodeId,
+        /// 表示テキスト(ロスレス原則。§9-7)。
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
     },
     /// 昇格したスパンの位置。中身は Anchor ノード側(§2.4)。
     Anchor {
@@ -197,6 +215,8 @@ pub enum Rel {
     Cites,
     /// 型付け(任意/将来)。
     InstanceOf,
+    /// ナビゲーション弱参照(§5.2, §9-1)。インライン `Ref` が materialise する。
+    RefersTo,
 }
 
 // 表 = 次元の木(§5)
@@ -249,6 +269,16 @@ pub enum CellValue {
     /// value ノード参照(prose と値を共有する場合)。
     Ref { to: NodeId },
     Empty,
+    /// 数量(数値+単位)。SML の型付きパース規則(D4)の canonical 表現(§9-3)。
+    Quantity { v: f64, unit: String },
+}
+
+/// セル参照(`cell:`)の座標(§5.3, §9-2)。
+/// strata-sml の同名型とは別物(両クレートは依存しないため重複定義でよい)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellCoord {
+    pub row_path: Vec<String>,
+    pub col_path: Vec<String>,
 }
 
 // 数式 = MathML サブセット(§6)
@@ -532,7 +562,7 @@ mod tests {
             payload: NodePayload::Para(Para {
                 inline: vec![
                     Inline::Text { s: "高次元データを".into() },
-                    Inline::Term { to: term_id },
+                    Inline::Term { to: term_id, text: String::new() },
                     Inline::Text { s: "で低次元へ写す。".into() },
                 ],
             }),
@@ -557,5 +587,104 @@ mod tests {
             invariants::validate(&g).as_slice(),
             [invariants::Violation::ContainsCycle { .. }, ..]
         ));
+    }
+
+    // --- WP-B3 (D-B2): 新フィールド/新バリアントの後方互換性・往復テスト ---
+
+    /// 旧形式(coord/text 省略)の Inline::Ref JSON が読め、default 値で補完されること。
+    #[test]
+    fn inline_ref_deserializes_legacy_json_without_coord_or_text() {
+        let to = NodeId::new();
+        let legacy = format!(r#"{{"t":"ref","to":"{}","rel":"depends-on"}}"#, to.0);
+        let parsed: Inline = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed, Inline::Ref { to, rel: Rel::DependsOn, coord: None, text: String::new() });
+    }
+
+    /// 旧形式(text 省略)の Inline::Term JSON が読め、default 値で補完されること。
+    #[test]
+    fn inline_term_deserializes_legacy_json_without_text() {
+        let to = NodeId::new();
+        let legacy = format!(r#"{{"t":"term","to":"{}"}}"#, to.0);
+        let parsed: Inline = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed, Inline::Term { to, text: String::new() });
+    }
+
+    /// Inline::Ref の coord/text 付き往復。cell: 参照の座標保持(§9-2, §5.3)。
+    #[test]
+    fn inline_ref_with_coord_and_text_roundtrips() {
+        let to = NodeId::new();
+        let inline = Inline::Ref {
+            to,
+            rel: Rel::RefersTo,
+            coord: Some(CellCoord {
+                row_path: vec!["Opt-v2".into()],
+                col_path: vec!["Dataset-A".into(), "Latency".into()],
+            }),
+            text: "12 ms".into(),
+        };
+        let json = serde_json::to_string(&inline).unwrap();
+        let back: Inline = serde_json::from_str(&json).unwrap();
+        assert_eq!(inline, back);
+    }
+
+    /// Inline::Term の text 付き往復(表示テキスト保持。§9-7)。
+    #[test]
+    fn inline_term_with_text_roundtrips() {
+        let to = NodeId::new();
+        let inline = Inline::Term { to, text: "予測精度".into() };
+        let json = serde_json::to_string(&inline).unwrap();
+        let back: Inline = serde_json::from_str(&json).unwrap();
+        assert_eq!(inline, back);
+    }
+
+    /// Rel::RefersTo が "refers-to" にシリアライズされ、往復すること(§9-1)。
+    #[test]
+    fn rel_refers_to_serializes_as_kebab_case() {
+        let json = serde_json::to_string(&Rel::RefersTo).unwrap();
+        assert_eq!(json, "\"refers-to\"");
+        let back: Rel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Rel::RefersTo);
+    }
+
+    /// CellValue::Quantity(数量セル)の往復(§9-3, D4)。
+    #[test]
+    fn cell_value_quantity_roundtrips() {
+        let cell = Cell {
+            row_path: vec!["Opt-v2".into()],
+            col_path: vec!["Dataset-A".into(), "Latency".into()],
+            value: CellValue::Quantity { v: 12.0, unit: "ms".into() },
+        };
+        let json = serde_json::to_string(&cell).unwrap();
+        let back: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(cell, back);
+    }
+
+    /// NodePayload::Document の往復。title あり/なしの両方(D12, §9-5)。
+    #[test]
+    fn document_node_roundtrips_with_and_without_title() {
+        let with_title = Node {
+            id: NodeId::new(),
+            payload: NodePayload::Document(Document { title: Some("設計メモ".into()) }),
+        };
+        let json = serde_json::to_string(&with_title).unwrap();
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_title, back);
+
+        let without_title =
+            Node { id: NodeId::new(), payload: NodePayload::Document(Document { title: None }) };
+        let json = serde_json::to_string(&without_title).unwrap();
+        // title: None は skip_serializing_if で落ちること。
+        assert!(!json.contains("title"));
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(without_title, back);
+    }
+
+    /// 旧形式(id/type のみ)の Document JSON が読め、title が None で補完されること。
+    #[test]
+    fn document_node_deserializes_legacy_json_without_title() {
+        let id = NodeId::new();
+        let legacy = format!(r#"{{"id":"{}","type":"document"}}"#, id.0);
+        let parsed: Node = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed, Node { id, payload: NodePayload::Document(Document { title: None }) });
     }
 }

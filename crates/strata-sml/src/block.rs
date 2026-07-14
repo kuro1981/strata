@@ -90,8 +90,11 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
             BlockKind::Fence(FenceBlock { fence_kind, id_tag, fence_attrs, body })
         }
         RawKind::CodeFence { marker_line_span, body_span } => {
-            let lang = marker_line_span.slice(src).trim_start_matches('`').trim().to_string();
-            BlockKind::CodeFence { lang, body: body_span }
+            // D10(2026-07-14 改定): コードフェンス開始行末尾の `{#id}` を見出しと
+            // 同じ規則で抽出する(行型ブロック)。
+            let (text_span, id_tag) = extract_trailing_id_tag(src, marker_line_span, diags);
+            let lang = text_span.slice(src).trim_start_matches('`').trim().to_string();
+            BlockKind::CodeFence { lang, body: body_span, id_tag }
         }
     };
 
@@ -102,22 +105,21 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
 }
 
 /// sml-spec §4: 「id を書けるのはプローズブロックの属性行だけ(行型は `{#}` を使う。
-/// 重複はエラー)」の実装。行型ブロック(見出し・リスト・フェンスマーカー)の前置
-/// 属性行に `id=` キーがある場合を検出する。2ケースに分岐する:
+/// 重複はエラー)」の実装。行型ブロック(見出し・フェンスマーカー・コードフェンス
+/// 開始行、D10)の前置属性行に `id=` キーがある場合を検出する。2ケースに分岐する:
 ///
 /// - 同じブロックが自身の `{#...}` タグも持つ(併記) → `DuplicateId`(既存の挙動)
 /// - `{#...}` タグは無く、属性行の `id=` のみがある → `IdNotAllowedHere`(新設)
 ///
-/// リスト項目は前置属性行がブロック(リスト全体)に束縛される一方、id_tag は項目ごと
-/// についているため直接の1対1対応が取れない。しかし「id はプローズ属性行専用」の
-/// 規則そのものは項目の `{#...}` 有無に関係なく成り立つ(リストという行型ブロックに
-/// 属性行 id= を書くこと自体が仕様違反)ので、リストは常に `IdNotAllowedHere` とする
-/// (保守的な解釈。詳細は最終報告のあいまい点を参照)。
+/// **リスト全体は D11(2026-07-14 改定)によりプローズブロック扱い**: リスト全体を
+/// 指す単一の行が存在しないため、段落と同様に前置属性行 `[id=...]` で ID を与える。
+/// 項目の `{#...}` とは別エンティティであり併記可(重複エラーにしない)。M1 実装の
+/// 「リストは常に IdNotAllowedHere」はこの改定で廃止された。
 fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Vec<Diag>) {
     let Some(attr_line) = attrs else { return };
 
     enum LineTypeState {
-        /// プローズブロック(段落)。id= はここでのみ許される。
+        /// プローズブロック(段落・リスト全体〈D11〉)。id= はここでのみ許される。
         NotLineType,
         /// 行型ブロックで、直接対応する `{#...}` タグを持つ(併記なら DuplicateId)。
         HasOwnIdTag,
@@ -132,8 +134,10 @@ fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Ve
         BlockKind::Fence(fb) => {
             if fb.id_tag.is_some() { LineTypeState::HasOwnIdTag } else { LineTypeState::NoDirectIdTag }
         }
-        BlockKind::List { .. } => LineTypeState::NoDirectIdTag,
-        BlockKind::Paragraph { .. } | BlockKind::CodeFence { .. } => LineTypeState::NotLineType,
+        BlockKind::CodeFence { id_tag, .. } => {
+            if id_tag.is_some() { LineTypeState::HasOwnIdTag } else { LineTypeState::NoDirectIdTag }
+        }
+        BlockKind::Paragraph { .. } | BlockKind::List { .. } => LineTypeState::NotLineType,
     };
 
     if matches!(state, LineTypeState::NotLineType) {
@@ -164,10 +168,11 @@ fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Ve
 /// `BadIdValue`、裸トークンでも字句が `[A-Za-z0-9_-]+` の外なら `BadKeyCharset`。
 /// 診断化しないと fmt が「ULID を発行しないまま静かに素通り」する経路が残る。
 ///
-/// 行型ブロックは `check_id_placement` が `id=` の存在自体を弾く(DuplicateId /
-/// IdNotAllowedHere)ため、ここでは値の検証を重ねない。
+/// 対象はプローズブロック(段落・リスト全体〈D11、2026-07-14 改定〉)。行型ブロック
+/// (見出し・フェンス・コードフェンス〈D10〉)は `check_id_placement` が `id=` の
+/// 存在自体を弾く(DuplicateId / IdNotAllowedHere)ため、ここでは値の検証を重ねない。
 fn check_id_value(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Vec<Diag>) {
-    if !matches!(kind, BlockKind::Paragraph { .. } | BlockKind::CodeFence { .. }) {
+    if !matches!(kind, BlockKind::Paragraph { .. } | BlockKind::List { .. }) {
         return;
     }
     let Some(attr_line) = attrs else { return };
@@ -242,7 +247,7 @@ fn is_valid_key_charset(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn parse_ref_target(token: &str) -> RefTarget {
+pub(crate) fn parse_ref_target(token: &str) -> RefTarget {
     match token.parse::<Ulid>() {
         Ok(u) => RefTarget::Ulid(u),
         Err(_) => RefTarget::Label(token.to_string()),
@@ -494,11 +499,11 @@ fn split_fence_attrs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scan::scan;
+    use crate::scan::scan_from;
 
     fn parse(src: &str) -> (Vec<SmlBlock>, Vec<Diag>) {
         let mut diags = Vec::new();
-        let raw = scan(src, &mut diags);
+        let raw = scan_from(src, 0, &mut diags);
         let blocks = build_blocks(src, raw, &mut diags);
         (blocks, diags)
     }

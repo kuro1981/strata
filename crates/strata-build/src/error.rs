@@ -1,0 +1,33 @@
+//! `BuildError` — build(M3)が全件収集して返すエラー種別(sml-build-m3-handoff.md D-B1)。
+//!
+//! 「全か無か」(D13): `build` はパース診断・解決エラーを1件でも検出したら
+//! グラフを返さず、収集した全 `BuildError` を `Err` として返す。
+
+use strata_sml::{Diag, Span};
+
+/// build のエラー種別(D-B1)。
+#[derive(Debug, Clone, PartialEq)]
+pub enum BuildError {
+    /// パーサの診断(`strata_sml::Diag`)をそのまま包む。
+    Parse(Diag),
+    /// ULID 未付与ブロック(fmt 未実行)。`strata fmt` を先に実行するよう案内する。
+    MissingId { span: Span },
+    /// 参照ターゲット(エイリアス)がファイル内に存在しない。
+    UnresolvedAlias { alias: String, span: Span },
+    /// 同名エイリアスが複数ブロックに定義されている(全定義箇所のスパンを持つ)。
+    DuplicateAlias { alias: String, spans: Vec<Span> },
+    /// `::figure` の属性不足・不正(kind 欠落、chart の data-ref/mark/encode 不足等)。
+    BadFigure { span: Span, msg: String },
+    /// 数式が tex2math でパースできない(`UnknownCommand` 等)。
+    Math { span: Span, msg: String },
+    /// インライン参照のスキーム(`table:`/`fig:`/`math:`/`cell:`)が対象ノードの実際の
+    /// 型と一致しない(sml-build-m3-handoff.md D-B5: 「不一致は `UnresolvedAlias` では
+    /// なく `BadFigure` 相当の新エラーでもよい — 裁量。ただし黙認はしない」を受けて
+    /// 新設した variant。裁量事項として最終報告で明記する)。
+    RefTypeMismatch { span: Span, msg: String },
+    /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
+    /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
+    /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant
+    /// (裁量事項として最終報告で明記する)。
+    Invariant(strata_core::invariants::Violation),
+}

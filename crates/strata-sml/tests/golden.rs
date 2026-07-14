@@ -12,10 +12,16 @@ fn read_doc(rel: &str) -> String {
 }
 
 /// 任意の入力に対し、パース結果のブロック列(隙間を含む)が全バイトを昇順・非重複・
-/// 全被覆でカバーし、隙間が空行のみであることを検証する。
+/// 全被覆でカバーし、隙間が空行のみであることを検証する。フロントマター(D12)が
+/// あれば、その `span`(オフセット0から始まる)も被覆の一部として扱う。
 fn assert_span_coverage(src: &str, out: &ParseOutput) {
     assert_eq!(out.doc.src_len, src.len());
     let mut cursor = 0usize;
+    if let Some(fm) = &out.doc.frontmatter {
+        assert_eq!(fm.span.start, 0, "frontmatter must start at offset 0");
+        assert!(fm.span.end <= src.len());
+        cursor = fm.span.end;
+    }
     for block in &out.doc.blocks {
         assert!(
             block.span.start >= cursor,
@@ -85,4 +91,32 @@ fn unclosed_code_fence_still_satisfies_coverage() {
     let out = parse(src);
     assert_span_coverage(src, &out);
     assert!(out.diags.iter().any(|d| d.kind == strata_sml::DiagKind::UnclosedFence));
+}
+
+// ---- フロントマター(D12)を含むスパン被覆 ---------------------------------------
+
+#[test]
+fn frontmatter_followed_by_blocks_satisfies_coverage() {
+    let src = "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntitle: T\n---\n\n# Heading\n\nParagraph.\n";
+    let out = parse(src);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    assert!(out.doc.frontmatter.is_some());
+    assert_span_coverage(src, &out);
+}
+
+#[test]
+fn frontmatter_only_document_satisfies_coverage() {
+    let src = "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\n---\n";
+    let out = parse(src);
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    assert!(out.doc.blocks.is_empty());
+    assert_span_coverage(src, &out);
+}
+
+#[test]
+fn unclosed_frontmatter_still_satisfies_coverage() {
+    let src = "---\nid: 01ARZ3NDEKTSV4RRFFQ69G5FAV\ntitle: no close\n";
+    let out = parse(src);
+    assert!(out.diags.iter().any(|d| d.kind == strata_sml::DiagKind::UnclosedFrontmatter));
+    assert_span_coverage(src, &out);
 }

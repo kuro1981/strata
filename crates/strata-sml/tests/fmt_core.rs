@@ -1,4 +1,4 @@
-//! WP-F1: fmt コアの外形テスト(docs/sml-fmt-m2-handoff.md)。
+//! WP-F1: fmt コアの外形テスト(docs/sml-fmt-m2-handoff.md、docs/sml-build-m3-handoff.md WP-B2)。
 //!
 //! 最重要ケース: `docs/sml_example_draft.sml` に固定 ULID 列を注入した結果が
 //! `docs/sml_example_formatted.sml` とバイト完全一致すること(簡易ゴールデン)。
@@ -11,15 +11,16 @@ fn read_doc(rel: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
 }
 
-/// draft の16ブロックに文書順で発行される固定 ULID 列
-/// (`01J2T8Z0000000000000000000` 〜 `01J2T8ZF000000000000000000`、handoff D-F5 参照)。
+/// draft の18ブロック(フロントマター生成込み)に文書順で発行される固定 ULID 列
+/// (`01J2T8Z0000000000000000000` 〜 `01J2T8ZH000000000000000000`、
+/// 末尾17文字目が Crockford Base32 の `0-9,A-H`。WP-B2 fixture 改版参照)。
 fn golden_idgen() -> impl FnMut() -> ulid::Ulid {
-    let ulids: Vec<ulid::Ulid> = "0123456789ABCDEF"
+    let ulids: Vec<ulid::Ulid> = "0123456789ABCDEFGH"
         .chars()
         .map(|c| format!("01J2T8Z{c}000000000000000000").parse().expect("valid crockford ulid"))
         .collect();
     let mut it = ulids.into_iter();
-    move || it.next().expect("golden fixture needs exactly 16 ulids")
+    move || it.next().expect("golden fixture needs exactly 18 ulids")
 }
 
 #[test]
@@ -72,15 +73,16 @@ fn parse_error_input_is_not_mutated_conceptually() {
 
 #[test]
 fn all_five_case_kinds_appear_across_block_kinds_in_golden_draft() {
-    // ゴールデン draft は D-F3 のケース1〜5をすべて少なくとも一度含む
-    // (見出し/リスト項目/フェンスマーカーの無ID、段落の属性行無し・id無し、
-    //  非ULIDラベルの {#...} と [id=...] の両方)。ここでは patch 件数が
-    // 期待通り16件であることだけを機械的に確認する(内容の正しさは
-    // golden_draft_formats_to_golden_formatted_byte_exact がバイト単位で保証する)。
+    // ゴールデン draft は D-F3 のケース1〜5(+ D-B4 のケース6: フロントマター生成)を
+    // すべて少なくとも一度含む(見出し/リスト項目/フェンスマーカーの無ID、段落・
+    // リスト全体の属性行無し・id無し、非ULIDラベルの {#...} と [id=...] の両方、
+    // フロントマター無し)。ここでは patch 件数が期待通り18件であることだけを
+    // 機械的に確認する(内容の正しさは golden_draft_formats_to_golden_formatted_byte_exact
+    // がバイト単位で保証する)。
     let draft = read_doc("sml_example_draft.sml");
     let mut idgen = golden_idgen();
     let out = format_with(&draft, &mut idgen).unwrap();
-    assert_eq!(out.patches.len(), 16, "{:#?}", out.patches);
+    assert_eq!(out.patches.len(), 18, "{:#?}", out.patches);
 }
 
 #[test]
