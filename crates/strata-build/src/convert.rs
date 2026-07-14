@@ -38,7 +38,7 @@ pub(crate) fn run(src: &str, doc: &SmlDocument, reg: Registry) -> (Graph, Option
     let root = b.reg.document_id;
     if let Some(doc_id) = root {
         let title = doc.frontmatter.as_ref().and_then(|fm| fm.title.clone());
-        b.graph.insert(Node { id: doc_id, payload: NodePayload::Document(Document { title }) });
+        b.graph.insert(Node::new(doc_id, NodePayload::Document(Document { title })));
     }
 
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
@@ -75,7 +75,7 @@ impl<'a> Builder<'a> {
                 }
                 let parent = current_parent(stack, root);
                 let heading = self.convert_inlines(id, inline);
-                self.graph.insert(Node { id, payload: NodePayload::Section(Section { heading }) });
+                self.graph.insert(Node::new(id, NodePayload::Section(Section { heading })));
                 if let Some(p) = parent {
                     self.add_contains(p, id);
                 }
@@ -84,24 +84,19 @@ impl<'a> Builder<'a> {
             }
             BlockKind::Paragraph { inline } => {
                 let inline = self.convert_inlines(id, inline);
-                self.graph.insert(Node { id, payload: NodePayload::Para(Para { inline }) });
+                self.graph.insert(Node::new(id, NodePayload::Para(Para { inline })));
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
                 self.apply_block_attrs(id, &block.attrs);
             }
             BlockKind::List { ordered, items } => {
-                self.graph.insert(Node { id, payload: NodePayload::List(CoreList { ordered: *ordered }) });
+                self.graph.insert(Node::new(id, NodePayload::List(CoreList { ordered: *ordered })));
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
                 self.apply_block_attrs(id, &block.attrs);
-                for item in items {
-                    let Registration { id: item_id, .. } = self.reg.by_span[&item.span];
-                    let inline = self.convert_inlines(item_id, &item.inline);
-                    self.graph.insert(Node { id: item_id, payload: NodePayload::Para(Para { inline }) });
-                    self.add_contains(id, item_id);
-                }
+                self.build_list_items(id, items);
             }
             BlockKind::Fence(fb) => {
                 match fb.fence_kind {
@@ -116,7 +111,7 @@ impl<'a> Builder<'a> {
             }
             BlockKind::CodeFence { lang, body, .. } => {
                 let src = body.slice(self.src).to_string();
-                self.graph.insert(Node { id, payload: NodePayload::Code(Code { lang: lang.clone(), src }) });
+                self.graph.insert(Node::new(id, NodePayload::Code(Code { lang: lang.clone(), src })));
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
@@ -125,21 +120,70 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// ブロック前置属性行の意味エッジ(supports/depends-on/cites、sml-spec §4.1)を
-    /// materialise する。`id`/`alias` キーは Pass 1 が既に消費済みなのでここでは無視、
-    /// カタログに無いキーも(将来拡張の前方互換のため)黙って無視する。
+    /// D24: リスト項目列を canonical へ写す。各項目は Para ノードとして親 List に
+    /// contains され(既存の平坦リストのグラフ表現と同一)、項目が子リストを持てば
+    /// 新しい List ノードを**親項目(Para)の子**として contains で接続し再帰する。
+    /// ネストした List ノード自体は SML 上に ID を書く場所が無いため、build が
+    /// その場で ID を自動生成する(build ごとに変わる。裁量 — 最終報告に記載)。
+    fn build_list_items(&mut self, parent: NodeId, items: &[strata_sml::ListItem]) {
+        for item in items {
+            let Registration { id: item_id, .. } = self.reg.by_span[&item.span];
+            let inline = self.convert_inlines(item_id, &item.inline);
+            self.graph.insert(Node::new(item_id, NodePayload::Para(Para { inline })));
+            self.add_contains(parent, item_id);
+            if let Some(child) = &item.child {
+                let child_list_id = NodeId::new();
+                self.graph
+                    .insert(Node::new(child_list_id, NodePayload::List(CoreList { ordered: child.ordered })));
+                self.add_contains(item_id, child_list_id);
+                self.build_list_items(child_list_id, &child.items);
+            }
+        }
+    }
+
+    /// ブロック前置属性行の意味エッジ(supports/depends-on/cites、sml-spec §4.1)と
+    /// class タグ(D23)を materialise する。`id`/`alias` キーは Pass 1 が既に消費済み
+    /// なのでここでは無視、カタログに無いキーも(将来拡張の前方互換のため)黙って無視する。
     fn apply_block_attrs(&mut self, from: NodeId, attrs: &Option<AttrLine>) {
         let Some(al) = attrs else { return };
         for (key, value, span) in &al.entries {
-            let rel = match key.as_str() {
-                "supports" => Rel::Supports,
-                "depends-on" => Rel::DependsOn,
-                "cites" => Rel::Cites,
-                _ => continue,
-            };
-            for token in attr_value_tokens(value) {
-                let to = self.resolve_attr_target(&token, *span);
-                self.graph.link(from, rel, to, None);
+            match key.as_str() {
+                "supports" | "depends-on" | "cites" => {
+                    let rel = match key.as_str() {
+                        "supports" => Rel::Supports,
+                        "depends-on" => Rel::DependsOn,
+                        "cites" => Rel::Cites,
+                        _ => unreachable!("外側の match で3キーに限定済み"),
+                    };
+                    for token in attr_value_tokens(value) {
+                        let to = self.resolve_attr_target(&token, *span);
+                        self.graph.link(from, rel, to, None);
+                    }
+                }
+                "class" => self.apply_class_attr(from, value, *span),
+                _ => {}
+            }
+        }
+    }
+
+    /// class タグ(D23、sml-spec §1.4)を検証して Node.classes に格納する。
+    /// 値は単一または `[a, b]` リスト、字句は key と同じ `[A-Za-z0-9_-]+`。
+    /// build の成否・グラフ構造は class に非依存(全ノードを常に格納する)ため、
+    /// 字句違反があってもこのブロック自体の構築は続ける — `errors` に積むだけ
+    /// (最終的に全か無かで弾かれるのは呼び出し元の `build` の責任)。
+    fn apply_class_attr(&mut self, from: NodeId, value: &AttrValue, span: Span) {
+        for token in attr_value_tokens(value) {
+            if is_valid_class_tag(&token) {
+                if let Some(node) = self.graph.nodes.get_mut(&from)
+                    && !node.classes.contains(&token)
+                {
+                    node.classes.push(token);
+                }
+            } else {
+                self.errors.push(BuildError::BadClass {
+                    span,
+                    msg: format!("class '{token}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
+                });
             }
         }
     }
@@ -185,7 +229,7 @@ impl<'a> Builder<'a> {
         let id = term::derive_term_id(name);
         self.term_ids.insert(name.to_string(), id);
         if !self.graph.nodes.contains_key(&id) {
-            self.graph.insert(Node { id, payload: NodePayload::Term(Term { name: name.to_string() }) });
+            self.graph.insert(Node::new(id, NodePayload::Term(Term { name: name.to_string() })));
         }
         id
     }
@@ -261,7 +305,7 @@ impl<'a> Builder<'a> {
         // フェンス内の `[caption=...]` を strata_core::Table.caption へ写す(D16)。
         let entries: Vec<&(String, AttrValue, Span)> = fb.fence_attrs.iter().flat_map(|al| al.entries.iter()).collect();
         let caption = find_entry(&entries, "caption").map(|(_, v, _)| vec![Inline::Text { s: attr_value_string(v) }]);
-        self.graph.insert(Node { id, payload: NodePayload::Table(Table { rows, cols, cells, caption }) });
+        self.graph.insert(Node::new(id, NodePayload::Table(Table { rows, cols, cells, caption })));
     }
 
     fn convert_dims(&self, dims: &[DimNode]) -> Vec<Dim> {
@@ -295,14 +339,14 @@ impl<'a> Builder<'a> {
         let tex = span.slice(self.src);
         match tex2math::parse_normalized(tex) {
             Ok(tree) => {
-                self.graph.insert(Node { id, payload: NodePayload::Math(MathBlock { tree: math::convert(tree) }) });
+                self.graph.insert(Node::new(id, NodePayload::Math(MathBlock { tree: math::convert(tree) })));
             }
             Err(e) => {
                 self.errors.push(BuildError::Math { span: *span, msg: format!("{e:?}") });
-                self.graph.insert(Node {
+                self.graph.insert(Node::new(
                     id,
-                    payload: NodePayload::Math(MathBlock { tree: strata_core::MathNode::Text { s: tex.to_string() } }),
-                });
+                    NodePayload::Math(MathBlock { tree: strata_core::MathNode::Text { s: tex.to_string() } }),
+                ));
             }
         }
     }
@@ -352,10 +396,10 @@ impl<'a> Builder<'a> {
         let data_ref = self.resolve_attr_target(&data_ref_str, data_ref_span);
         // `[depicts=...]` / `[depicts.<key>=...]` を ImageFigure.depicts と同形で写す(D16)。
         let depicts = fold_depicts(entries);
-        self.graph.insert(Node {
+        self.graph.insert(Node::new(
             id,
-            payload: NodePayload::Figure(Figure::Chart(Chart { data_ref, mark, encode: Encoding { x, y, color }, caption, depicts })),
-        });
+            NodePayload::Figure(Figure::Chart(Chart { data_ref, mark, encode: Encoding { x, y, color }, caption, depicts })),
+        ));
     }
 
     fn build_image_figure(&mut self, id: NodeId, entries: &[&(String, AttrValue, Span)], block_span: Span) {
@@ -374,7 +418,7 @@ impl<'a> Builder<'a> {
 
         let depicts = fold_depicts(entries);
 
-        self.graph.insert(Node { id, payload: NodePayload::Figure(Figure::Image(ImageFigure { src, alt, depicts, caption })) });
+        self.graph.insert(Node::new(id, NodePayload::Figure(Figure::Image(ImageFigure { src, alt, depicts, caption }))));
     }
 }
 
@@ -419,6 +463,11 @@ fn attr_value_string(v: &AttrValue) -> String {
 
 fn find_entry<'e>(entries: &[&'e (String, AttrValue, Span)], key: &str) -> Option<&'e (String, AttrValue, Span)> {
     entries.iter().find(|(k, _, _)| k == key).copied()
+}
+
+/// class タグの字句制約(D23、sml-spec §7の key 字句と同じ `[A-Za-z0-9_-]+`)。
+fn is_valid_class_tag(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn parse_mark(s: &str) -> Option<Mark> {

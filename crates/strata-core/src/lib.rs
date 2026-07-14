@@ -55,8 +55,21 @@ impl Default for NodeId {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
+    /// 出し分けの意味分類タグ(D23、sml-spec §1.4)。「誰に見せるか」はビュー側
+    /// (`render --hide <class>`)の仕事で、ここには「何であるか」だけを置く。
+    /// build はグラフ構造・成否ともに class に非依存(全ノードを常に格納する)。
+    /// 後方互換フィールド(空なら旧形式 JSON と同じ形にシリアライズされる)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub classes: Vec<String>,
     #[serde(flatten)]
     pub payload: NodePayload,
+}
+
+impl Node {
+    /// class 無しでノードを作る通常コンストラクタ。
+    pub fn new(id: NodeId, payload: NodePayload) -> Self {
+        Node { id, classes: Vec::new(), payload }
+    }
 }
 
 /// ノード型カタログ(§3)。物理レイアウトのバリアントは存在しない。
@@ -522,7 +535,7 @@ mod tests {
             }],
             caption: None,
         };
-        let node = Node { id: NodeId::new(), payload: NodePayload::Table(table) };
+        let node = Node::new(NodeId::new(), NodePayload::Table(table));
         let json = serde_json::to_string(&node).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(node, back);
@@ -552,7 +565,7 @@ mod tests {
                 },
             ],
         };
-        let node = Node { id: NodeId::new(), payload: NodePayload::Math(MathBlock { tree: sum }) };
+        let node = Node::new(NodeId::new(), NodePayload::Math(MathBlock { tree: sum }));
         let json = serde_json::to_string(&node).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(node, back);
@@ -565,17 +578,17 @@ mod tests {
         let para_id = NodeId::new();
 
         let mut g = Graph::default();
-        g.insert(Node { id: term_id, payload: NodePayload::Term(Term { name: "次元削減".into() }) });
-        g.insert(Node {
-            id: para_id,
-            payload: NodePayload::Para(Para {
+        g.insert(Node::new(term_id, NodePayload::Term(Term { name: "次元削減".into() })));
+        g.insert(Node::new(
+            para_id,
+            NodePayload::Para(Para {
                 inline: vec![
                     Inline::Text { s: "高次元データを".into() },
                     Inline::Term { to: term_id, text: String::new() },
                     Inline::Text { s: "で低次元へ写す。".into() },
                 ],
             }),
-        });
+        ));
         // インラインの Term に対応する Edge を materialise。
         g.link(para_id, Rel::TermRef, term_id, None);
 
@@ -588,8 +601,8 @@ mod tests {
         let a = NodeId::new();
         let b = NodeId::new();
         let mut g = Graph::default();
-        g.insert(Node { id: a, payload: NodePayload::Section(Section { heading: vec![] }) });
-        g.insert(Node { id: b, payload: NodePayload::Section(Section { heading: vec![] }) });
+        g.insert(Node::new(a, NodePayload::Section(Section { heading: vec![] })));
+        g.insert(Node::new(b, NodePayload::Section(Section { heading: vec![] })));
         g.link(a, Rel::Contains, b, Some(0));
         g.link(b, Rel::Contains, a, Some(0)); // 閉路
         assert!(matches!(
@@ -671,16 +684,14 @@ mod tests {
     /// NodePayload::Document の往復。title あり/なしの両方(D12, §9-5)。
     #[test]
     fn document_node_roundtrips_with_and_without_title() {
-        let with_title = Node {
-            id: NodeId::new(),
-            payload: NodePayload::Document(Document { title: Some("設計メモ".into()) }),
-        };
+        let with_title =
+            Node::new(NodeId::new(), NodePayload::Document(Document { title: Some("設計メモ".into()) }));
         let json = serde_json::to_string(&with_title).unwrap();
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(with_title, back);
 
         let without_title =
-            Node { id: NodeId::new(), payload: NodePayload::Document(Document { title: None }) };
+            Node::new(NodeId::new(), NodePayload::Document(Document { title: None }));
         let json = serde_json::to_string(&without_title).unwrap();
         // title: None は skip_serializing_if で落ちること。
         assert!(!json.contains("title"));
@@ -694,7 +705,7 @@ mod tests {
         let id = NodeId::new();
         let legacy = format!(r#"{{"id":"{}","type":"document"}}"#, id.0);
         let parsed: Node = serde_json::from_str(&legacy).unwrap();
-        assert_eq!(parsed, Node { id, payload: NodePayload::Document(Document { title: None }) });
+        assert_eq!(parsed, Node::new(id, NodePayload::Document(Document { title: None })));
     }
 
     // --- D16(2026-07-14): Table.caption / Chart.depicts の後方互換性 -----------------
@@ -764,5 +775,37 @@ mod tests {
         };
         let json = serde_json::to_string(&empty).unwrap();
         assert!(!json.contains("depicts"));
+    }
+
+    // --- D23(2026-07-14): Node.classes の後方互換性 ---------------------------------
+
+    /// 旧形式(classes フィールド自体が無い)の Node JSON が読め、classes が空 Vec で
+    /// 補完されること(既存ゴールデン JSON を壊さないための後方互換、D23)。
+    #[test]
+    fn node_deserializes_legacy_json_without_classes() {
+        let id = NodeId::new();
+        let legacy = format!(r#"{{"id":"{}","type":"document"}}"#, id.0);
+        let parsed: Node = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed, Node::new(id, NodePayload::Document(Document { title: None })));
+        assert!(parsed.classes.is_empty());
+    }
+
+    /// classes ありの往復。classes が空なら "classes" が出力に現れないこと
+    /// (skip_serializing_if による後方互換の維持)。
+    #[test]
+    fn node_classes_roundtrip_and_omitted_when_empty() {
+        let with_classes = Node {
+            id: NodeId::new(),
+            classes: vec!["note".to_string(), "actual-name".to_string()],
+            payload: NodePayload::Para(Para { inline: vec![] }),
+        };
+        let json = serde_json::to_string(&with_classes).unwrap();
+        assert!(json.contains(r#""classes":["note","actual-name"]"#), "{json}");
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_classes, back);
+
+        let without_classes = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![] }));
+        let json = serde_json::to_string(&without_classes).unwrap();
+        assert!(!json.contains("classes"), "{json}");
     }
 }

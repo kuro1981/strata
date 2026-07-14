@@ -137,6 +137,46 @@ fn render_missing_file_exits_1() {
     assert!(stderr_str(&out).contains("Failed to read input file"));
 }
 
+// ---- D23(2026-07-14 裁定): `render --hide <class>` -----------------------------
+
+/// `--hide` 無しなら確認版と同じ本文が出る(既存 render の退行がないこと)。
+/// `--hide note` を付けると class=note のブロックが消え、そこへの Ref も
+/// warning 付きでプレーンテキスト化される。
+#[test]
+fn render_hide_removes_classed_subtree_and_warns_on_dangling_ref() {
+    let tmp = TempDir::new("render-hide");
+    let file = tmp.path().join("doc.sml");
+    let src = "\
+---
+id: 01J2T8Z1000000000000000000
+---
+
+# 職務経歴 {#01J2T8Z2000000000000000000}
+
+[id=01J2T8Z3000000000000000000, class=note]
+【補足】これは面接用のメモで実名を含む。
+
+[id=01J2T8Z4000000000000000000, supports=01J2T8Z3000000000000000000]
+詳細は[こちら](ref:01J2T8Z3000000000000000000)を参照。
+";
+    std::fs::write(&file, src).unwrap();
+
+    // 確認版(--hide なし): 補足がそのまま残る。
+    let check = run(&["render", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&check), 0, "stderr: {}", stderr_str(&check));
+    assert!(stdout_str(&check).contains("【補足】"));
+
+    // 提出版(--hide note): 補足が消え、そこへの Ref が warning 付きで剥がされる。
+    let hidden = run(&["render", "--hide", "note", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&hidden), 0, "stderr: {}", stderr_str(&hidden));
+    let out = stdout_str(&hidden);
+    assert!(!out.contains("【補足】"), "{out}");
+    assert!(out.contains("こちら"), "text 表示は残る: {out}");
+    let err = stderr_str(&hidden);
+    assert!(err.contains("warning"), "stderr: {err}");
+    assert!(err.contains("HiddenRef"), "stderr: {err}");
+}
+
 /// 既存フローの退行がないこと: `render` 追加後も `fmt` / `build` サブコマンドが
 /// 動作すること。
 #[test]

@@ -25,6 +25,10 @@ pub enum BuildError {
     /// なく `BadFigure` 相当の新エラーでもよい — 裁量。ただし黙認はしない」を受けて
     /// 新設した variant。**D14(2026-07-14、sml-spec.md §1.2)で正式承認**。
     RefTypeMismatch { span: Span, msg: String },
+    /// class タグの字句が `[A-Za-z0-9_-]+` に違反する(D23、sml-spec §1.4)。
+    /// build の成否は class の有無に依存しない設計だが、字句だけは検証する
+    /// (`WP-X1` の実装ハンドオフ: 「class を検証(字句違反は BuildError)」)。
+    BadClass { span: Span, msg: String },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
     /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。

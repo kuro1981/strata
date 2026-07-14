@@ -79,6 +79,20 @@ pub struct ListItem {
     pub span: Span,
     pub inline: Vec<SmlInline>,
     pub id_tag: Option<IdTag>,
+    /// ネストした子リスト(D24、2026-07-14 裁定)。2スペース/レベルのインデントで
+    /// 表現される。「項目=段落1つ」の制約は維持するため、子リストは項目内容とは
+    /// 別に高々1つだけ持てる(項目内複数ブロックは引き続き保留 §10)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<Box<ListBlock>>,
+}
+
+/// ネストしたリスト1つ(D24)。トップレベルの `BlockKind::List` と同形。ネストした
+/// リストは前置属性行を書ける場所が無い(親項目の行に埋め込まれるため)ため、ID/alias
+/// を持たない — canonical では build が自動生成した ID を持つ `List` ノードになる。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ListBlock {
+    pub ordered: bool,
+    pub items: Vec<ListItem>,
 }
 
 // ---- ID / エイリアス --------------------------------------------------------

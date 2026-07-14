@@ -183,3 +183,44 @@ fn bad_key_charset_label() {
     let out = parse("# Title {#bad.label}\n");
     assert!(out.diags.iter().any(|d| d.kind == DiagKind::BadKeyCharset), "{:?}", out.diags);
 }
+
+// ---- D23(2026-07-14 裁定): class 属性 -------------------------------------------
+//
+// `class` は sml-spec §4.1 の既知キー(supports/depends-on/cites/id/alias/class)に
+// 含まれるため、UnknownAttrKey を発火しない。値の字句検証(BadClass)は strata-build
+// の仕事(このクレートは AttrValue をそのまま保持するだけ)。
+
+#[test]
+fn class_key_on_paragraph_does_not_raise_unknown_attr_key() {
+    let out = parse("[id=foo, class=note]\nParagraph.\n");
+    assert!(!out.diags.iter().any(|d| d.kind == DiagKind::UnknownAttrKey), "{:?}", out.diags);
+    let attrs = out.doc.blocks[0].attrs.as_ref().unwrap();
+    assert_eq!(attrs.entries[1].0, "class");
+    assert_eq!(attrs.entries[1].1, AttrValue::Single("note".to_string()));
+}
+
+#[test]
+fn class_key_accepts_list_value() {
+    let out = parse("[id=foo, class=[note, actual-name]]\nParagraph.\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let attrs = out.doc.blocks[0].attrs.as_ref().unwrap();
+    assert_eq!(attrs.entries[1].1, AttrValue::List(vec!["note".to_string(), "actual-name".to_string()]));
+}
+
+/// class は行型ブロック(見出し・フェンス)にも前置属性行で付けられる(id と違い、
+/// class は §4 の「id を書けるのはプローズブロックの属性行だけ」制限の対象外)。
+#[test]
+fn class_key_allowed_on_heading_attr_line() {
+    let out = parse("[class=note]\n# Title\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let attrs = out.doc.blocks[0].attrs.as_ref().unwrap();
+    assert_eq!(attrs.entries[0].0, "class");
+}
+
+#[test]
+fn class_key_allowed_on_fence_attr_line() {
+    let out = parse("[class=note]\n::math {#x}\nx = 1\n::\n");
+    assert!(out.diags.is_empty(), "{:?}", out.diags);
+    let attrs = out.doc.blocks[0].attrs.as_ref().unwrap();
+    assert_eq!(attrs.entries[0].0, "class");
+}

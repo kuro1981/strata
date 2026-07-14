@@ -15,7 +15,7 @@
 use ulid::Ulid;
 
 use crate::ast::{
-    AttrLine, AttrValue, BlockKind, FenceBlock, FenceBody, FenceKind, IdTag, ListItem, RefTarget,
+    AttrLine, AttrValue, BlockKind, FenceBlock, FenceBody, FenceKind, IdTag, ListBlock, ListItem, RefTarget,
     SmlBlock,
 };
 use crate::error::{Diag, DiagKind};
@@ -45,16 +45,12 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
             BlockKind::Paragraph { inline }
         }
         RawKind::List { ordered, item_line_spans } => {
-            let items = item_line_spans
-                .into_iter()
-                .map(|line_span| {
-                    let (text_span, id_tag) = extract_trailing_id_tag(src, line_span, diags);
-                    // 項目マーカー(`- ` / `N. `)はインライン本文に含めない。
-                    let text_span = strip_list_marker(src, text_span);
-                    let inline = crate::inline::parse_inlines(src, text_span, diags);
-                    ListItem { span: line_span, inline, id_tag }
-                })
-                .collect();
+            // D24(2026-07-14 裁定): item_line_spans はインデント無し(ルート)・
+            // インデント有り(ネスト候補)の両方を含む文書順のフラット列(scan.rs が
+            // マーカー行として一括りにしている)。ここでインデント量(2スペース/レベル)
+            // を解釈して木構造に組み立てる(sml-spec §6.1 の table.rs と同じ手法)。
+            let mut idx = 0;
+            let items = parse_list_items(src, &item_line_spans, &mut idx, diags, 0);
             BlockKind::List { ordered, items }
         }
         RawKind::Fence { marker_line_span, body_span } => {
@@ -106,13 +102,14 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
 }
 
 /// sml-spec §4.1 + D17: ブロック前置属性行(意味エッジ宣言用)のキーが
-/// `supports` / `depends-on` / `cites` / `id` / `alias` のいずれでもなければ
-/// `UnknownAttrKey`(`Warning`)。`apply_block_attrs`(strata-build)は未知キーを
-/// 従来どおり黙って無視し続けるため、これは「エッジが張られないタイポ」に気付く
-/// ための警告に過ぎない。フェンス内属性行(`::table`/`::figure` の `[caption=...]`
-/// 等、`fb.fence_attrs`)は語彙が別物なのでこの検査の対象外。
+/// `supports` / `depends-on` / `cites` / `id` / `alias` / `class`(D23、2026-07-14
+/// 裁定)のいずれでもなければ `UnknownAttrKey`(`Warning`)。`apply_block_attrs`
+/// (strata-build)は未知キーを従来どおり黙って無視し続けるため、これは「エッジが
+/// 張られないタイポ」に気付くための警告に過ぎない。フェンス内属性行(`::table`/
+/// `::figure` の `[caption=...]` 等、`fb.fence_attrs`)は語彙が別物なのでこの検査の
+/// 対象外。
 fn check_unknown_attr_keys(attrs: &Option<AttrLine>, diags: &mut Vec<Diag>) {
-    const KNOWN: [&str; 5] = ["supports", "depends-on", "cites", "id", "alias"];
+    const KNOWN: [&str; 6] = ["supports", "depends-on", "cites", "id", "alias", "class"];
     let Some(attr_line) = attrs else { return };
     for (key, _, span) in &attr_line.entries {
         if !KNOWN.contains(&key.as_str()) {
@@ -266,6 +263,96 @@ fn strip_list_marker(src: &str, span: Span) -> Span {
 
 fn is_valid_key_charset(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+// ---- D24(2026-07-14 裁定): ネストしたリスト項目のパース ------------------------
+//
+// `table.rs` の次元木パーサ(`parse_dim_list` / `parse_member_list`)と同じ手法:
+// インデント量を絶対列(2スペース/レベル)として解釈し、レベルが下がれば呼び出し元に
+// 制御を返す(再帰下降)。「リストとして解釈できないインデント行には診断を出す」
+// (D24)を `InconsistentIndent`(table.rs と同一種別。全か無かの整合上、既存の
+// テーブル本体インデント診断と同じく `Error` 重大度)で実現する — 診断を出しつつ
+// その行はスキップして処理を続ける(パーサは1件のエラーで止まらない、sml-spec §8.2)。
+
+/// 行頭の半角スペースの個数を数える(2スペース/レベルのインデント量)。
+fn leading_space_count(src: &str, span: Span) -> usize {
+    span.slice(src).as_bytes().iter().take_while(|&&b| b == b' ').count()
+}
+
+/// インデント量(スペース数)を「2スペース単位のレベル」に変換する。
+/// 戻り値の bool は「2の倍数だったか」(false なら `InconsistentIndent` 対象)。
+fn list_level_of(indent: usize) -> (usize, bool) {
+    (indent / 2, indent.is_multiple_of(2))
+}
+
+/// 行(インデント込み)の先頭マーカーが番号付き(`N. `)かどうか。この行が既に
+/// scan.rs でマーカー行と判定済みであることを前提とする(`- ` でなければ番号付きと
+/// みなす)。
+fn line_marker_is_ordered(src: &str, span: Span) -> bool {
+    let stripped = span.slice(src).trim_start_matches(' ');
+    !(stripped.starts_with("- ") || stripped.starts_with("-\t"))
+}
+
+/// `lines[*idx]` から、インデントレベルが `level` のリスト項目を連続して読み取る
+/// (レベルが `level` 未満になったら親スコープに戻ったとみなして止まる)。各項目の
+/// 直後の行がさらに1段深ければ、それを子リスト(D24)として再帰的に読み取る。
+fn parse_list_items(
+    src: &str,
+    lines: &[Span],
+    idx: &mut usize,
+    diags: &mut Vec<Diag>,
+    level: usize,
+) -> Vec<ListItem> {
+    let mut items = Vec::new();
+    while *idx < lines.len() {
+        let line_span = lines[*idx];
+        let indent = leading_space_count(src, line_span);
+        let (line_level, aligned) = list_level_of(indent);
+        if !aligned {
+            if line_level < level {
+                break;
+            }
+            diags.push(Diag::new(
+                DiagKind::InconsistentIndent,
+                line_span,
+                "リスト項目のインデントが2スペース単位で揃っていません",
+            ));
+            *idx += 1;
+            continue;
+        }
+        if line_level < level {
+            break;
+        }
+        if line_level > level {
+            diags.push(Diag::new(
+                DiagKind::InconsistentIndent,
+                line_span,
+                "リスト項目のインデントが深すぎます(対応する親項目がありません)",
+            ));
+            *idx += 1;
+            continue;
+        }
+
+        *idx += 1;
+        let (text_span, id_tag) = extract_trailing_id_tag(src, line_span, diags);
+        // 項目マーカー(`- ` / `N. `、インデント込み)はインライン本文に含めない。
+        let text_span = strip_list_marker(src, text_span);
+        let inline = crate::inline::parse_inlines(src, text_span, diags);
+
+        let mut child = None;
+        if *idx < lines.len() {
+            let next_indent = leading_space_count(src, lines[*idx]);
+            let (next_level, next_aligned) = list_level_of(next_indent);
+            if next_aligned && next_level == level + 1 {
+                let ordered = line_marker_is_ordered(src, lines[*idx]);
+                let nested = parse_list_items(src, lines, idx, diags, level + 1);
+                child = Some(Box::new(ListBlock { ordered, items: nested }));
+            }
+        }
+
+        items.push(ListItem { span: line_span, inline, id_tag, child });
+    }
+    items
 }
 
 pub(crate) fn parse_ref_target(token: &str) -> RefTarget {

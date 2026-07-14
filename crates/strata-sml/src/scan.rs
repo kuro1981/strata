@@ -93,6 +93,7 @@ fn heading_level(text: &str) -> Option<u8> {
 }
 
 /// `Some(true)` = 番号付き、`Some(false)` = 番号なし、`None` = リスト項目でない。
+/// `text` は行頭からそのまま(インデント無しを前提)。
 fn list_marker_ordered(text: &str) -> Option<bool> {
     if text.starts_with("- ") || text.starts_with("-\t") {
         return Some(false);
@@ -105,6 +106,15 @@ fn list_marker_ordered(text: &str) -> Option<bool> {
         }
     }
     None
+}
+
+/// D24(2026-07-14 裁定): 行頭の半角スペースを何個でも読み飛ばしたうえでリスト項目
+/// マーカーを判定する。ネストしたリスト項目(2スペース/レベルでインデントされる)を
+/// 層Aのブロック境界検出で「リスト項目行」として扱い続けさせるために使う
+/// (2スペース単位かどうか等の妥当性検証は層B `block.rs` の仕事。ここでは「マーカーの
+/// 形をしているか」だけを見る)。
+fn indented_list_marker_ordered(text: &str) -> Option<bool> {
+    list_marker_ordered(text.trim_start_matches(' '))
 }
 
 /// `::table` / `::math` / `::figure` のいずれかで開くフェンスマーカーか。
@@ -164,7 +174,13 @@ fn classify(src: &str, line: &PhysLine) -> LineClass {
     if let Some(level) = heading_level(text) {
         return LineClass::Heading(level);
     }
-    if let Some(ordered) = list_marker_ordered(text) {
+    // D24: インデントされたマーカー行(ネストしたリスト項目の候補)も ListItem として
+    // 扱い、リストブロックのグルーピング(scan_one_block)を継続させる。新規ブロックの
+    // 開始判定(scan_lines のトップループ)もこの同じ classify を使うため、インデント
+    // 付きの孤立したマーカー行がブロック先頭に来た場合も ListItem になる —
+    // その場合は層B(block.rs)がインデント0を期待する箇所で `InconsistentIndent` を
+    // 診断する(従来の「無警告で別段落に化ける」誤パースを診断に置き換える、D24)。
+    if let Some(ordered) = indented_list_marker_ordered(text) {
         return LineClass::ListItem(ordered);
     }
     if looks_like_attr_line(src, line.content) {

@@ -140,10 +140,11 @@ fn plan_block(src: &str, block: &SmlBlock, idgen: &mut dyn FnMut() -> Ulid, patc
         BlockKind::Paragraph { .. } => plan_prose_id(src, block, idgen, patches),
         BlockKind::List { items, .. } => {
             // リスト全体の ID は前置属性行(プローズ扱い、D11)→ 各項目の順(D-B4)。
+            // D24(2026-07-14 裁定): ネスト項目にも同じ規則で ID を注入する。子リストは
+            // 親項目の行の直後に現れるため、文書順は「親項目 → その子リストの各項目
+            // (再帰) → 次の兄弟項目」になる。
             plan_prose_id(src, block, idgen, patches);
-            for item in items {
-                plan_list_item_id(src, item, idgen, patches);
-            }
+            plan_list_items_ids(src, items, idgen, patches);
         }
     }
 }
@@ -176,6 +177,17 @@ fn plan_list_item_id(src: &str, item: &ListItem, idgen: &mut dyn FnMut() -> Ulid
             patches.push(Patch { at, delete: 0, insert: format!(" {{#{ulid}}}") });
         }
         Some(tag) => plan_id_tag_relabel(tag, idgen, patches),
+    }
+}
+
+/// D24: 項目列を文書順に走査し、各項目 → その子リスト(あれば、再帰)の順で ID を
+/// 計画する。子リストは親項目の行の直後に現れるため、これが文書順と一致する。
+fn plan_list_items_ids(src: &str, items: &[ListItem], idgen: &mut dyn FnMut() -> Ulid, patches: &mut Vec<Patch>) {
+    for item in items {
+        plan_list_item_id(src, item, idgen, patches);
+        if let Some(child) = &item.child {
+            plan_list_items_ids(src, &child.items, idgen, patches);
+        }
     }
 }
 

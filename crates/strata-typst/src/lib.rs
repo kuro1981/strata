@@ -6,11 +6,20 @@
 //! 描画が辿るのは `Rel::Contains` のみ(D-R2 6.): supports/depends-on/cites/
 //! RefersTo/TermRef はグラフの意味情報であり紙面には出さない。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use strata_core::{
     CellCoord, CellValue, Chart, DimTree, EmphKind, Figure, Graph, ImageFigure, Inline, List, Mark, MathNode,
     NodeId, NodePayload, Scalar, Table, Term,
 };
+
+/// `render --hide <class>`(D23)の結果。`text` は本文、`warnings` は非表示ノードへの
+/// `Ref` を剥がした際の警告(fmt/build の「行:列: warning: 種別: メッセージ」形式に
+/// 揃えた文字列。render はソース位置を持たないため `-:-` を使う)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderOutput {
+    pub text: String,
+    pub warnings: Vec<String>,
+}
 
 /// グラフから Typst ソースを描画する(D18: 中間 JSON を介さず build → render を直結)。
 ///
@@ -22,9 +31,29 @@ use strata_core::{
 /// 文書タイトル(D21 の3段フォールバックの最終段)。CLI は入力ファイル名(拡張子抜き)
 /// を渡す想定(sml-render-m4-handoff.md D-R2 1. で「シグネチャは裁量」とされた箇所。
 /// 呼び出し側にフォールバック名を渡させる形で決定した)。
+///
+/// `--hide` を使わない既定経路(D23 以前と後方互換)。内部は
+/// `render_to_typst_with_hide` に `hide: &[]` で委譲するだけなので、warnings は
+/// 常に空になる(非表示クラスが無ければ隠れる Ref も存在しない)。
 pub fn render_to_typst(graph: &Graph, root: NodeId, fallback_title: &str) -> Result<String, String> {
-    let mut renderer = TypstRenderer::new(graph);
+    render_to_typst_with_hide(graph, root, fallback_title, &[]).map(|out| out.text)
+}
+
+/// D23: `render --hide <class>` の本体。`hide` に列挙された class を1つでも持つ
+/// ブロックノードを contains サブツリーごと非描画にする。非表示ノードへの `Ref` が
+/// 残った場合は `RenderOutput::warnings` に積みつつリンクを剥がしてプレーンテキスト化
+/// する(表示 `text` があれば `text`、無ければ短い代替表記)。
+pub fn render_to_typst_with_hide(
+    graph: &Graph,
+    root: NodeId,
+    fallback_title: &str,
+    hide: &[String],
+) -> Result<RenderOutput, String> {
+    let hide_set: HashSet<&str> = hide.iter().map(String::as_str).collect();
+    let hidden = compute_hidden(graph, &hide_set);
+    let mut renderer = TypstRenderer::new(graph, hidden);
     let (title, content) = renderer.render_root(root, fallback_title)?;
+    let warnings = renderer.warnings;
 
     let doc = format!(
         r##"// Strata Document - Generated Typst Source
@@ -47,6 +76,10 @@ pub fn render_to_typst(graph: &Graph, root: NodeId, fallback_title: &str) -> Res
 // 有効にすると、ブロック数式(display 形)にだけ番号が振られる(インライン数式は
 // Typst が非 display と判定するため番号は付かない)。
 #set math.equation(numbering: "(1)")
+// D25: figure(表・図)をページ境界で分割可能にする。既定の unbreakable のままだと
+// ページ丈を超える表が (1) 表の前に大きな空白ページを作る (2) はみ出した行が次ページの
+// 内容と重なる、の両方を引き起こす(30行ネスト表のドッグフーディングで実測)。
+#show figure: set block(breakable: true)
 
 // スタイル定義
 #show heading: set text(fill: rgb("#2b3a42"))
@@ -70,16 +103,46 @@ pub fn render_to_typst(graph: &Graph, root: NodeId, fallback_title: &str) -> Res
         title = typst_string_escape(&title),
     );
 
-    Ok(doc)
+    Ok(RenderOutput { text: doc, warnings })
+}
+
+/// class(D23)による非表示化の対象ノード集合を計算する。`hide` に列挙された class を
+/// 1つでも持つノードを種として、contains の子孫を BFS で辿り、サブツリーごと集める。
+fn compute_hidden(graph: &Graph, hide: &HashSet<&str>) -> HashSet<NodeId> {
+    let mut hidden = HashSet::new();
+    if hide.is_empty() {
+        return hidden;
+    }
+    let mut stack: Vec<NodeId> = graph
+        .nodes
+        .iter()
+        .filter(|(_, n)| n.classes.iter().any(|c| hide.contains(c.as_str())))
+        .map(|(id, _)| *id)
+        .collect();
+    while let Some(id) = stack.pop() {
+        if hidden.insert(id) {
+            stack.extend(graph.children_of(id));
+        }
+    }
+    hidden
 }
 
 struct TypstRenderer<'a> {
     graph: &'a Graph,
+    /// D23: `--hide` によりサブツリーごと非描画にするノード ID の集合。空なら
+    /// `--hide` 無し(全ノード描画、既存 M4 挙動と完全一致)。
+    hidden: HashSet<NodeId>,
+    /// 非表示ノードへの `Ref` を剥がした際の警告(D23)。
+    warnings: Vec<String>,
 }
 
 impl<'a> TypstRenderer<'a> {
-    fn new(graph: &'a Graph) -> Self {
-        Self { graph }
+    fn new(graph: &'a Graph, hidden: HashSet<NodeId>) -> Self {
+        Self { graph, hidden, warnings: Vec::new() }
+    }
+
+    fn is_hidden(&self, id: NodeId) -> bool {
+        self.hidden.contains(&id)
     }
 
     /// D21: 文書タイトルの3段フォールバック(`Document.title` → 最初の H1 → 呼び出し側
@@ -101,6 +164,9 @@ impl<'a> TypstRenderer<'a> {
 
             let mut content = String::new();
             for child_id in self.graph.children_of(root) {
+                if self.is_hidden(child_id) {
+                    continue;
+                }
                 content.push_str(&self.render_node(child_id, 1)?);
             }
             Ok((title, content))
@@ -117,6 +183,9 @@ impl<'a> TypstRenderer<'a> {
     /// 箇所)。
     fn first_h1_title(&self, root: NodeId) -> Option<String> {
         for child_id in self.graph.children_of(root) {
+            if self.is_hidden(child_id) {
+                continue;
+            }
             if let Some(NodePayload::Section(s)) = self.graph.nodes.get(&child_id).map(|n| &n.payload) {
                 return Some(self.plain_text(&s.heading));
             }
@@ -152,6 +221,9 @@ impl<'a> TypstRenderer<'a> {
 
                 let mut children_typst = String::new();
                 for child_id in self.graph.children_of(node_id) {
+                    if self.is_hidden(child_id) {
+                        continue;
+                    }
                     children_typst.push_str(&self.render_node(child_id, depth + 1)?);
                 }
 
@@ -200,24 +272,64 @@ impl<'a> TypstRenderer<'a> {
     /// ブロックへラベルを付ける(sml-render-m4-handoff.md「既知の注意点」に対応する
     /// 実装上の裁量)。
     fn render_list(&mut self, l: &List, node_id: NodeId, depth: usize) -> Result<String, String> {
-        let marker = if l.ordered { "+" } else { "-" };
-        let mut items_typst = String::new();
+        let items_typst = self.render_list_items(l, node_id, depth, 0)?;
+        Ok(format!("#block[\n{}] <{}>\n\n", items_typst, label(node_id)))
+    }
 
-        for child_id in self.graph.children_of(node_id) {
+    /// D24: リスト項目列を Typst マークアップの行(`- item` / `+ item`)として描画する。
+    /// 項目(Para)が子 List を contains していれば、Typst のネストリスト記法
+    /// (2スペース/レベルのインデント)で直後に展開する。ネストした List ノード自体には
+    /// Typst ラベルを付けない(裁量): その ID は build が毎回自動生成するもので、SML
+    /// から `Ref` の対象になり得ない(参照が書けない)ため、リンク先としての用途が
+    /// 存在しない。項目(Para)側のラベルは従来どおり全項目に付く。
+    fn render_list_items(
+        &mut self,
+        l: &List,
+        list_id: NodeId,
+        depth: usize,
+        indent: usize,
+    ) -> Result<String, String> {
+        let marker = if l.ordered { "+" } else { "-" };
+        let pad = "  ".repeat(indent);
+        let mut out = String::new();
+
+        for child_id in self.graph.children_of(list_id) {
+            if self.is_hidden(child_id) {
+                continue;
+            }
             let child_node = self
                 .graph
                 .nodes
                 .get(&child_id)
                 .ok_or_else(|| format!("Child node not found: {:?}", child_id))?;
 
-            let child_content = match &child_node.payload {
-                NodePayload::Para(p) => self.render_inlines(&p.inline)?,
-                _ => self.render_node(child_id, depth)?,
-            };
-            items_typst.push_str(&format!("{} {} <{}>\n", marker, child_content, label(child_id)));
+            match &child_node.payload {
+                NodePayload::Para(p) => {
+                    let inline = p.inline.clone();
+                    let content = self.render_inlines(&inline)?;
+                    out.push_str(&format!("{}{} {} <{}>\n", pad, marker, content, label(child_id)));
+                    // 項目の下にネストした子リスト(D24)があれば、1段深いインデントで続ける。
+                    let sub_ids = self.graph.children_of(child_id);
+                    for sub_id in sub_ids {
+                        if self.is_hidden(sub_id) {
+                            continue;
+                        }
+                        if let Some(NodePayload::List(sub_list)) =
+                            self.graph.nodes.get(&sub_id).map(|n| &n.payload)
+                        {
+                            let sub_list = sub_list.clone();
+                            out.push_str(&self.render_list_items(&sub_list, sub_id, depth, indent + 1)?);
+                        }
+                    }
+                }
+                _ => {
+                    let content = self.render_node(child_id, depth)?;
+                    out.push_str(&format!("{}{} {} <{}>\n", pad, marker, content, label(child_id)));
+                }
+            }
         }
 
-        Ok(format!("#block[\n{}] <{}>\n\n", items_typst, label(node_id)))
+        Ok(out)
     }
 
     fn render_inlines(&mut self, inlines: &[Inline]) -> Result<String, String> {
@@ -264,8 +376,25 @@ impl<'a> TypstRenderer<'a> {
     /// - `text` が空、かつ対象が番号を持たない(Section/Para/List/Code 等)
     ///   → `#link` + 短い代替表記(Section は見出しテキスト、それ以外は "§"。
     ///   sml-render-m4-handoff.md D-R2 5. で明示的に裁量とされた箇所)。
-    fn render_ref(&self, to: NodeId, text: &str, coord: Option<&CellCoord>) -> String {
+    ///
+    /// D23: 対象が `--hide` によりサブツリーごと非表示になっている場合、リンクは
+    /// 出せない(Typst のラベル自体が存在しなくなる)ため、`Warning` を積んだうえで
+    /// リンクを剥がしたプレーンテキストへフォールバックする(`text` があれば
+    /// `text`、無ければ短い代替表記「(非表示)」)。
+    fn render_ref(&mut self, to: NodeId, text: &str, coord: Option<&CellCoord>) -> String {
         let coord_suffix = coord.map(format_coord).unwrap_or_default();
+
+        if self.is_hidden(to) {
+            self.warnings.push(format!(
+                "-:-: warning: HiddenRef: 参照先 {} は --hide により非表示です。リンクを外しプレーンテキスト化しました。",
+                label(to)
+            ));
+            return if !text.is_empty() {
+                format!("{}{}", typst_escape(text), coord_suffix)
+            } else {
+                format!("(非表示){}", coord_suffix)
+            };
+        }
 
         if !text.is_empty() {
             return format!("#link(<{}>)[{}{}]", label(to), typst_escape(text), coord_suffix);
@@ -354,11 +483,14 @@ impl<'a> TypstRenderer<'a> {
 
         let mut out = String::new();
 
+        // D25: 列幅は全列 `1fr`(等分)。従来は行ヘッダ列を `auto` にしていたが、
+        // ヘッダのラベルが長文(プロジェクト名等)の場合に auto 列が利用可能幅を
+        // ほぼ食い尽くし、データ列(fr)が幅ゼロに潰れて1文字縦書きになる
+        // (ドッグフーディングの 30 行ネスト表で実測)。Typst の列指定には
+        // 「上限付き auto」が無いため、潰れが構造的に起こらない等分 fr を既定とする
+        // (裁量 — 列幅のカスタマイズは将来のビュー/テンプレート層の仕事、D25)。
         let mut col_specs = Vec::new();
-        for _ in 0..d_row {
-            col_specs.push("auto".to_string());
-        }
-        for _ in 0..col_leaves.len() {
+        for _ in 0..(d_row + col_leaves.len()) {
             col_specs.push("1fr".to_string());
         }
 

@@ -99,9 +99,7 @@ fn register_block(
         }
         BlockKind::List { items, .. } => {
             register_prose(block.span, &block.attrs, NodeKindTag::List, reg, alias_defs, errors);
-            for item in items {
-                register_line_type(item.span, &item.id_tag, NodeKindTag::Para, reg, alias_defs, errors);
-            }
+            register_list_items(items, reg, alias_defs, errors);
         }
         BlockKind::Fence(fb) => {
             let kind = match fb.fence_kind {
@@ -113,6 +111,24 @@ fn register_block(
         }
         BlockKind::CodeFence { id_tag, .. } => {
             register_line_type(block.span, id_tag, NodeKindTag::Code, reg, alias_defs, errors);
+        }
+    }
+}
+
+/// D24: リスト項目列を文書順に走査し、各項目(Para 扱い)→ その子リスト(あれば
+/// 再帰)の順で登録する。ネストした子リスト自体は SML 上に ID を書く場所が無い
+/// (前置属性行を置けない)ため、ここでは登録しない — 子 List ノードの ID は
+/// Pass 2(convert.rs)が build ごとに自動生成する(裁量。最終報告に記載)。
+fn register_list_items(
+    items: &[strata_sml::ListItem],
+    reg: &mut Registry,
+    alias_defs: &mut HashMap<String, Vec<Span>>,
+    errors: &mut Vec<BuildError>,
+) {
+    for item in items {
+        register_line_type(item.span, &item.id_tag, NodeKindTag::Para, reg, alias_defs, errors);
+        if let Some(child) = &item.child {
+            register_list_items(&child.items, reg, alias_defs, errors);
         }
     }
 }

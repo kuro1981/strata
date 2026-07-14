@@ -18,6 +18,10 @@
 // 有効にすると、ブロック数式(display 形)にだけ番号が振られる(インライン数式は
 // Typst が非 display と判定するため番号は付かない)。
 #set math.equation(numbering: "(1)")
+// D25: figure(表・図)をページ境界で分割可能にする。既定の unbreakable のままだと
+// ページ丈を超える表が (1) 表の前に大きな空白ページを作る (2) はみ出した行が次ページの
+// 内容と重なる、の両方を引き起こす(30行ネスト表のドッグフーディングで実測)。
+#show figure: set block(breakable: true)
 
 // スタイル定義
 #show heading: set text(fill: rgb("#2b3a42"))
@@ -57,7 +61,7 @@
 
 #figure(
   table(
-    columns: (auto, 1fr, 1fr, 1fr, 1fr),
+    columns: (1fr, 1fr, 1fr, 1fr, 1fr),
     stroke: 0.5pt + luma(150),
     fill: (x, y) => if y < 2 or x < 1 { rgb("#f7f9fa") } else { none },
     table.cell(colspan: 1, rowspan: 2)[],

@@ -52,6 +52,11 @@ struct RenderArgs {
     /// Write the Typst source to this file instead of stdout
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Hide blocks (and their contains subtree) carrying this class (D23).
+    /// May be repeated: `--hide note --hide actual-name`.
+    #[arg(long = "hide")]
+    hide: Vec<String>,
 }
 
 fn main() {
@@ -202,23 +207,31 @@ fn run_render(args: RenderArgs) {
     // Document.title も最初の H1 も無い場合にのみ使われる)。
     let fallback_title = args.file.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
 
-    let typst_src = match strata_typst::render_to_typst(&out.graph, root, fallback_title) {
-        Ok(s) => s,
+    // D23: `--hide` 無しでも常に `render_to_typst_with_hide` を経由する(hide が
+    // 空なら挙動は従来の `render_to_typst` と完全一致し、warnings も常に空になる)。
+    let render_out = match strata_typst::render_to_typst_with_hide(&out.graph, root, fallback_title, &args.hide) {
+        Ok(o) => o,
         Err(e) => {
             eprintln!("render error: {}", e);
             std::process::exit(2);
         }
     };
 
+    // D23: 非表示ノードへの Ref を剥がした際の警告。fmt/build の Warning と同じ
+    // stderr 出力(exit code には影響しない)。
+    for w in &render_out.warnings {
+        eprintln!("{}", w);
+    }
+
     match args.output {
         Some(path) => {
-            if let Err(e) = write_atomic(&path, &typst_src) {
+            if let Err(e) = write_atomic(&path, &render_out.text) {
                 eprintln!("Failed to write output file: {}", e);
                 std::process::exit(1);
             }
         }
         None => {
-            print!("{}", typst_src);
+            print!("{}", render_out.text);
         }
     }
     std::process::exit(0);
@@ -277,6 +290,10 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
         E::RefTypeMismatch { span, msg } => {
             let (line, col) = at(*span, src);
             vec![format!("{}:{}: RefTypeMismatch: {}", line, col, msg)]
+        }
+        E::BadClass { span, msg } => {
+            let (line, col) = at(*span, src);
+            vec![format!("{}:{}: BadClass: {}", line, col, msg)]
         }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }
