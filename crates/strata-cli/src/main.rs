@@ -1,22 +1,17 @@
-use clap::{Args as ClapArgs, Parser, Subcommand, ValueEnum};
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use strata_sml::Span;
 
-/// トップレベル CLI。既存の YAML→HTML/Typst フロー(`-i/-o/-f`)を無変更で温存しつつ、
-/// `fmt` サブコマンドを追加する(docs/sml-fmt-m2-handoff.md D-F4)。
-///
-/// `args_conflicts_with_subcommands` でトップレベル引数とサブコマンドの併用を禁止し、
-/// `subcommand_negates_reqs` で `fmt` 使用時に `--input` の必須制約を外す。
+/// トップレベル CLI。`fmt` / `build` / `render` サブコマンドを提供する(旧 YAML→HTML
+/// フローは M4 の vault 削除(docs/sml-render-m4-handoff.md D-R1)で撤去済み)。
+/// `render` は canonical グラフ(層2)から Typst マークアップを直接出力する
+/// (D-R3。中間 JSON は介さない。strata-html への導線は持たない — D19)。
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Strata Document Builder CLI", long_about = None)]
-#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Command>,
-
-    #[command(flatten)]
-    args: Args,
+    command: Command,
 }
 
 #[derive(Subcommand, Debug)]
@@ -25,6 +20,8 @@ enum Command {
     Fmt(FmtArgs),
     /// Build an SML file into a canonical graph (JSON)
     Build(BuildArgs),
+    /// Render an SML file into Typst markup (build + render, no intermediate JSON)
+    Render(RenderArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -48,111 +45,22 @@ struct BuildArgs {
 }
 
 #[derive(ClapArgs, Debug)]
-struct Args {
-    /// Input YAML document file
-    #[arg(short, long, required = true)]
-    input: Option<PathBuf>,
+struct RenderArgs {
+    /// SML file to render
+    file: PathBuf,
 
-    /// Output file path
+    /// Write the Typst source to this file instead of stdout
     #[arg(short, long)]
     output: Option<PathBuf>,
-
-    /// Output format. If not specified, inferred from output file extension
-    #[arg(short, long, value_enum)]
-    format: Option<Format>,
-}
-
-#[derive(ValueEnum, Clone, Copy, Debug, PartialEq)]
-enum Format {
-    Html,
-    Typst,
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Some(Command::Fmt(fmt_args)) => run_fmt(fmt_args),
-        Some(Command::Build(build_args)) => run_build(build_args),
-        None => run_legacy(cli.args),
+        Command::Fmt(fmt_args) => run_fmt(fmt_args),
+        Command::Build(build_args) => run_build(build_args),
+        Command::Render(render_args) => run_render(render_args),
     }
-}
-
-/// 既存の YAML→HTML/Typst フロー。挙動(ログ・exit code)は M1 時点から一切変更しない。
-fn run_legacy(args: Args) {
-    // `--input` は `required = true` により、サブコマンド未指定時は clap が必ず埋める。
-    let input = args.input.expect("--input is required when no subcommand is given (enforced by clap)");
-
-    // フォーマットと出力パスの決定
-    let format = args.format.unwrap_or_else(|| {
-        if let Some(ref out) = args.output
-            && let Some(ext) = out.extension()
-            && ext == "typ"
-        {
-            return Format::Typst;
-        }
-        Format::Html
-    });
-
-    let output_path = args.output.unwrap_or_else(|| match format {
-        Format::Html => PathBuf::from("output.html"),
-        Format::Typst => PathBuf::from("output.typ"),
-    });
-
-    println!("Loading document from: {:?}", input);
-    let yaml_str = match fs::read_to_string(&input) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read input file: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    println!("Parsing Strata document...");
-    let parser = strata_vault::Parser::new();
-    let vault = match parser.parse_vault(&yaml_str) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Parse error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // 不変条件の検証
-    println!("Validating document invariants...");
-    let violations = strata_core::invariants::validate(&vault.graph);
-    if !violations.is_empty() {
-        eprintln!("Invariants violation detected!");
-        for v in violations {
-            eprintln!(" - {:?}", v);
-        }
-        std::process::exit(1);
-    }
-
-    println!("Rendering to {:?}...", format);
-    let output_content = match format {
-        Format::Html => match strata_html::render_to_html(&vault.graph, vault.root_id) {
-            Ok(html) => html,
-            Err(e) => {
-                eprintln!("HTML rendering error: {}", e);
-                std::process::exit(1);
-            }
-        },
-        Format::Typst => match strata_typst::render_to_typst(&vault.graph, vault.root_id) {
-            Ok(typ) => typ,
-            Err(e) => {
-                eprintln!("Typst rendering error: {}", e);
-                std::process::exit(1);
-            }
-        },
-    };
-
-    println!("Writing output to: {:?}", output_path);
-    if let Err(e) = fs::write(&output_path, output_content) {
-        eprintln!("Failed to write output file: {}", e);
-        std::process::exit(1);
-    }
-
-    println!("Done! Successfully compiled Strata document.");
 }
 
 /// `strata-cli fmt` サブコマンド(docs/sml-fmt-m2-handoff.md D-F4)。
@@ -252,6 +160,68 @@ fn run_build(args: BuildArgs) {
             std::process::exit(0);
         }
     }
+}
+
+/// `strata-cli render` サブコマンド(docs/sml-render-m4-handoff.md D-R3)。
+///
+/// 内部で `strata_build::build` → `strata_typst::render_to_typst` を直結する
+/// (中間 JSON なし)。exit code: 成功 0 / 読み書き失敗 1 / BuildError・render エラー
+/// 2。`root: None`(フロントマター無し)は D21 の案内文言で exit 2。
+fn run_render(args: RenderArgs) {
+    let src = match fs::read_to_string(&args.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let out = match strata_build::build(&src) {
+        Err(errors) => {
+            // build と同じ表示形式を再利用する(D-R3)。
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+
+    // D17: Warning は stderr に出しつつ exit 0(全か無かの対象外)。
+    print_warnings(&out.warnings, &src);
+
+    let Some(root) = out.root else {
+        // D21: フロントマター無し(root: None)は render 対象外。
+        eprintln!("フロントマターがありません。`strata fmt` を先に実行してください。");
+        std::process::exit(2);
+    };
+
+    // D-R2 1.: フォールバック文書名は入力ファイル名(拡張子抜き)を渡す(裁量。
+    // Document.title も最初の H1 も無い場合にのみ使われる)。
+    let fallback_title = args.file.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
+
+    let typst_src = match strata_typst::render_to_typst(&out.graph, root, fallback_title) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("render error: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    match args.output {
+        Some(path) => {
+            if let Err(e) = write_atomic(&path, &typst_src) {
+                eprintln!("Failed to write output file: {}", e);
+                std::process::exit(1);
+            }
+        }
+        None => {
+            print!("{}", typst_src);
+        }
+    }
+    std::process::exit(0);
 }
 
 /// `BuildError` 1件を「行:列: 種別: メッセージ」形式の行(複数になりうる)に変換する。

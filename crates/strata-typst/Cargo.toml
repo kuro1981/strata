@@ -7,3 +7,8 @@ edition = "2024"
 strata-core = { path = "../strata-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[dev-dependencies]
+# ゴールデン契約テスト(formatted fixture の build → render)専用。ライブラリ本体は
+# strata-build に依存しない(strata-core のみ)。
+strata-build = { path = "../strata-build" }
