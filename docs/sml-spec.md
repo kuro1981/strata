@@ -58,6 +58,16 @@ D15〜D17 は精密化。
 | D16 | Table.caption / Chart.depicts | strata-core に後方互換で追加: `Table.caption: Option<Vec<Inline>>`、`Chart.depicts: BTreeMap<String,String>`(`ImageFigure.depicts` と同形・同じキー畳み規則)。build がフェンス内属性行(`[caption=...]`・`[depicts=...]`/`[depicts.*]`)から写す |
 | D17 | Diag に severity(Error/Warning)を導入 | 診断に `Error`/`Warning` の重大度を持たせる。新設2種別(`DuplicateFrontmatterKey`・`UnknownAttrKey`)のみ `Warning`、既存種別はすべて `Error`。「全か無か」(§8.2)は **`Error` にのみ適用**: `Warning` だけの入力は fmt/build とも成功し、`Warning` を結果と併せて返す |
 
+### 1.3 M4(render)設計決定(2026-07-14 対話にて確定)
+
+| # | 論点 | 裁定 |
+|---|---|---|
+| D18 | M4 のスコープと CLI | サブコマンド `render` を新設: `strata-cli render <file.sml> [-o out.typ]`。内部で build → render を直結し、中間 JSON は介さない(JSON 入力のパイプライン分割は将来の拡張として保留)。exit code は build と同じ 0/1/2、Warning は stderr 表示のうえ exit 0 |
+| D19 | レンダラの主従 | **Typst を一次レンダラ**とし、M4 以降の新語彙の描画対応は strata-typst にのみ実装する。strata-html は現状機能のまま**凍結**(クレートは残置するが CLI からの導線は持たない)。Web 表示は将来の「グラフ UI」フェーズで再設計する — 意味グラフ文書の閲覧体験(ノード単位のナビゲーション)は Typst の HTML export では制御できないため、その時点で自前 HTML を再起動する。`render` の `--format` は当面 Typst のみ |
+| D20 | vault の削除 | crates/strata-vault・`vault/`(YAML データ)・CLI の旧 YAML フロー(`run_legacy`)を**削除**する。履歴書は Strata 本線に持ち込まない(ユーザー裁定)。必要になれば git 履歴から採取できる |
+| D21 | Document の描画 | `Document.title` は文書メタ(`#set document(title: ...)`)にのみ使い、本文には出さない(本文見出しは Section の H1 に任せ二重表示しない)。title 無しは最初の H1 のプレーンテキスト、それも無ければ入力ファイル名にフォールバック。`root: None`(フロントマター無し)の render はエラー(「strata fmt を先に実行してください」案内、exit 2) |
+| D22 | 参照の描画 | 全ブロックノードに Typst ラベル `<ULID>` を付与する。`::table`/`::math`/`::figure` は Typst の `figure` 要素に包んで**自動番号付け**(「表 1」「図 1」「式 1」、`set text(lang: "ja")`)を得る。`Ref` は表示 `text` があれば `#link(<label>)[text]`、無ければ `@ULID`(自動番号参照)。番号を持たない対象(段落・リスト・コード)への text 無し参照は `#link` + 短い代替表記とする(詳細はハンドオフの裁量)。`Term` は `text` → Term ノードの `name` の順で表示(用語集・defines は引き続き保留) |
+
 ---
 
 ## 2. 文書モデルとブロック分類
@@ -432,7 +442,7 @@ build も同じ方針(D13)。
 
 ## 10. 凍結 vs 保留
 
-**凍結(本書の契約):** D1〜D17・P1〜P4 の全決定、§2.1・§3〜§8 の記法と fmt/build 契約。
+**凍結(本書の契約):** D1〜D22・P1〜P4 の全決定、§2.1・§3〜§8 の記法と fmt/build 契約。
 
 **解消済み(2026-07-14):** コードフェンスの ID 記法(→ D10)、文書ルート/
 フロントマター(→ D12)、リスト全体の ID(→ D11)。
