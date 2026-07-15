@@ -164,7 +164,7 @@ M3(build)実装で顕在化した曖昧点への裁定。[D14](ref:d14) は [D8]
 [id=01KXJR7K8EPXBEFCBZ0EXAK60Z]
 論点は、build エラーの拡張の追認である。
 
-[id=01KXJR7K8EPXBEFCBZ0EXAK610]
+[id=01KXJR7K8EPXBEFCBZ0EXAK610, revises=[d8, d13]]
 strata-build の `BuildError::RefTypeMismatch { span, msg }`(参照スキーム `table:`/`fig:`/`math:`/`cell:` と対象ノード型の不一致。黙認しない)と `BuildError::Invariant(Violation)`(build 後の `invariants::validate` 違反の包み。ソース位置なし)を正式承認。あわせて tex2math に `\hat`(`UnderOver` の over-only 形)を追加したことを M3 実装の追認として記録する。
 
 ### D15 Term ID v0 の Unicode 正規化 {#01KXJR7K8EPXBEFCBZ0EXAK611 alias=d15}
@@ -399,7 +399,7 @@ AI 向けコンテキストビューの専用サブコマンド `strata context 
 [id=01KXJR7K8EPXBEFCBZ0EXAK63R]
 論点は、互換範囲と扱いである。
 
-[id=01KXJR7K8EPXBEFCBZ0EXAK63S, depends-on=d19]
+[id=01KXJR7K8EPXBEFCBZ0EXAK63S, depends-on=d19, revises=d39]
 **Tier 1(CommonMark コアの穴埋め)+ Tier 2(GFM 実用拡張)を1マイルストーンで実装**(ユーザー裁定)。Tier 1: インラインエスケープ(`\*` 等)/ 外部リンク(`http(s)`・`mailto`)・autolink・インライン画像 `![alt](url)` / 参照スタイルリンク(定義行は非可視メタとして解決)/ ゆるいリスト統合(空行区切りの同種リストは1つの List)/ 順序リスト `start` 保存 / 強調ネスト(`***bold italic***`)修正 / Setext 見出し / `~~~` フェンス / blockquote / 代替記法(`*`・`+` 箇条書き、`1)`、`_em_`・`__strong__`)/ 見出し閉じ `#` 装飾。Tier 2: GFM パイプ表を**フラット2次元の Table ノードへブリッジ** / `~~取消線~~` / タスクリスト(チェック状態の構造化)。Tier 3(意図的非対応の明記): **HTML ブロック/インラインは非対応+Warning**(意味グラフに落ちない。リテラル扱いは維持)、**脚注は保留**(§10)。新語彙は [D19](ref:d19) に従い core→パーサ→fmt→build→**strata-typst→strata-context**の全層へ波及させる。未知スキームの `UnknownScheme` Error は真に未知のものに限定して維持。
 
 ## M7(ワークスペース層)設計決定(2026-07-15 対話にて確定) {#01KXJR7K8EPXBEFCBZ0EXAK63T alias=m7-workspace}
@@ -454,7 +454,7 @@ AI 向けコンテキストビューの専用サブコマンド `strata context 
 [id=01KXJR7K8EPXBEFCBZ0EXAK64D]
 論点は、class の実効セマンティクス統一である。
 
-[id=01KXJR7K8EPXBEFCBZ0EXAK64E]
+[id=01KXJR7K8EPXBEFCBZ0EXAK64E, revises=d23]
 **実効 class = 自身+祖先(contains 上流)の和集合**を全消費者(render --hide / context --class / view の class フィルタ)で保証する。複数ブロックにまたがる note はコンテナ(セクション・リスト・引用)に class を1回書けばよい([D23](ref:d23) 継承の明文化)。執筆ガイドに指針を追記し、実データの note 連打(1段落ごとに `[class=note]` を繰り返す形)はコンテナ形式へリライトする。
 
 ## M8(設計文書の自己 SML 化)設計決定(2026-07-15 対話にて確定) {#01KXJR7K8EPXBEFCBZ0EXAK64F alias=m8-self-sml}
@@ -464,7 +464,7 @@ AI 向けコンテキストビューの専用サブコマンド `strata context 
 [id=01KXJR7K8EPXBEFCBZ0EXAK64H]
 論点は、自己適用の方針である。
 
-[id=01KXJR7K8EPXBEFCBZ0EXAK64J]
+[id=01KXJR7K8EPXBEFCBZ0EXAK64J, depends-on=d37]
 本仕様書 §1 の裁定群([D1](ref:d1)〜[D46](ref:d46)・[P1](ref:p1)〜[P4](ref:p4))を SML 化する(`docs/spec-sml/`)。狙い: **意味エッジ(depends-on / refers-to)の実戦データ**(履歴書は論証密度が低くエッジがほぼ未使用だった)、仕様書という第二ジャンルでの摩擦収集、設計対話の `context` 武装(「[D23](ref:d23) に依存する裁定は?」を機械に聞ける)、そして将来のグラフ UI に映す実データ。**正典は当面 md のまま**(SML 版は派生実験。二重化の移行判断は摩擦レポート後に別途)。エッジは [D37](ref:d37) の確信原則(本文が明示的に依拠を語る箇所のみ depends-on、単なる言及は inline ref)。1裁定 = 1 Section(alias=d1〜d46/p1〜p4)、マイルストーン節が contains 階層。
 
 [id=01KXJR7K8EPXBEFCBZ0EXAK64K]

@@ -59,9 +59,10 @@ pub enum DiagKind {
     /// フロントマターの同一キー(`id` / `title` 等)が複数行で宣言されている(D17)。
     /// 挙動は従来どおり後勝ち(最後の出現が採用される)のまま、`Warning`。
     DuplicateFrontmatterKey,
-    /// 属性行のキーが `supports` / `depends-on` / `cites` / `id` / `alias` の
-    /// いずれでもない(D17)。エッジが張られないタイポの検出用。挙動は従来どおり
-    /// 無視のまま(`apply_block_attrs` は未知キーを黙って読み飛ばす)、`Warning`。
+    /// 属性行のキーが `supports` / `depends-on` / `cites` / `revises`
+    /// (sml-spec §1.13 D48) / `id` / `alias` のいずれでもない(D17)。エッジが
+    /// 張られないタイポの検出用。挙動は従来どおり無視のまま(`apply_block_attrs`
+    /// は未知キーを黙って読み飛ばす)、`Warning`。
     UnknownAttrKey,
     /// `::record` 本体の行に `:` が無い(D28、sml-spec §1.5)。「キー: 値」の構文に
     /// 従っていない行はキーを特定できないため、その行はスキップして処理を続ける。

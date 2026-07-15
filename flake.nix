@@ -38,11 +38,17 @@
         # adjust the `buildInputs` line here to include language
         # packages if you choose one when bootstrapping the project.
         default = pkgs.mkShell {
+          # G1 WS-B (docs/graph-ui-g1-handoff.md, sml-spec.md §1.13 D50): ui/ の
+          # pnpm ワークスペースをビルドするため Node.js(LTS)+ pnpm を追加。
+          # devLang.nodePackages(.devenv/lang-dev.nix)は nodejs/yarn/pnpm を持つが
+          # yarn は使わないので個別に足す(commonDev/rustPackages と同じ粒度)。
           buildInputs = devCommon.commonDev ++ devLang.rustPackages ++ [
             pkgs.typst
             pkgs.hackgen-font
             pkgs.noto-fonts-cjk-sans
             pkgs.ipaexfont
+            pkgs.nodejs
+            pkgs.pnpm
           ];
           shellHook = ''
             export PATH="$HOME/.local/bin:$PATH"

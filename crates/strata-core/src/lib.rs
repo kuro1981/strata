@@ -287,6 +287,12 @@ pub enum Rel {
     InstanceOf,
     /// ナビゲーション弱参照(§5.2, §9-1)。インライン `Ref` が materialise する。
     RefersTo,
+    /// 改定・追認・精密化・明文化(sml-spec §1.13 D48)。方向は新→旧
+    /// (A revises B = A は B を改定する)。属性行キー `revises=` が materialise する。
+    /// 描画方針は supports 等と同じ(紙面には出さない意味エッジ)。
+    /// 追加は既存シリアライズとの後方互換を壊さない(enum への単純追加、
+    /// 旧データに `revises` は出現しないだけ)。
+    Revises,
 }
 
 // 表 = 次元の木(§5)
@@ -792,6 +798,15 @@ mod tests {
         assert_eq!(json, "\"refers-to\"");
         let back: Rel = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Rel::RefersTo);
+    }
+
+    /// Rel::Revises が "revises" にシリアライズされ、往復すること(sml-spec §1.13 D48)。
+    #[test]
+    fn rel_revises_serializes_as_kebab_case() {
+        let json = serde_json::to_string(&Rel::Revises).unwrap();
+        assert_eq!(json, "\"revises\"");
+        let back: Rel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, Rel::Revises);
     }
 
     /// CellValue::Quantity(数量セル)の往復(§9-3, D4)。

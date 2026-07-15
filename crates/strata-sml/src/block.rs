@@ -245,21 +245,21 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>, refdefs: &RefDefs
 }
 
 /// sml-spec §4.1 + D17: ブロック前置属性行(意味エッジ宣言用)のキーが
-/// `supports` / `depends-on` / `cites` / `id` / `alias` / `class`(D23、2026-07-14
-/// 裁定)のいずれでもなければ `UnknownAttrKey`(`Warning`)。`apply_block_attrs`
-/// (strata-build)は未知キーを従来どおり黙って無視し続けるため、これは「エッジが
-/// 張られないタイポ」に気付くための警告に過ぎない。フェンス内属性行(`::table`/
-/// `::figure` の `[caption=...]` 等、`fb.fence_attrs`)は語彙が別物なのでこの検査の
-/// 対象外。
+/// `supports` / `depends-on` / `cites` / `revises`(sml-spec §1.13 D48) /
+/// `id` / `alias` / `class`(D23、2026-07-14 裁定)のいずれでもなければ
+/// `UnknownAttrKey`(`Warning`)。`apply_block_attrs`(strata-build)は未知キーを
+/// 従来どおり黙って無視し続けるため、これは「エッジが張られないタイポ」に
+/// 気付くための警告に過ぎない。フェンス内属性行(`::table`/`::figure` の
+/// `[caption=...]` 等、`fb.fence_attrs`)は語彙が別物なのでこの検査の対象外。
 fn check_unknown_attr_keys(attrs: &Option<AttrLine>, diags: &mut Vec<Diag>) {
-    const KNOWN: [&str; 6] = ["supports", "depends-on", "cites", "id", "alias", "class"];
+    const KNOWN: [&str; 7] = ["supports", "depends-on", "cites", "revises", "id", "alias", "class"];
     let Some(attr_line) = attrs else { return };
     for (key, _, span) in &attr_line.entries {
         if !KNOWN.contains(&key.as_str()) {
             diags.push(Diag::new(
                 DiagKind::UnknownAttrKey,
                 *span,
-                format!("属性キー '{key}' は既知のキー(supports/depends-on/cites/id/alias/class)ではありません(タイポの可能性。エッジは張られません)"),
+                format!("属性キー '{key}' は既知のキー(supports/depends-on/cites/revises/id/alias/class)ではありません(タイポの可能性。エッジは張られません)"),
             ));
         }
     }
@@ -1048,6 +1048,24 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, "id");
         assert_eq!(entries[1].0, "supports");
+    }
+
+    /// sml-spec §1.13 D48: `revises=` は既知の属性キー(supports/depends-on/cites と
+    /// 同列)であり、`UnknownAttrKey` warning を出さない。
+    #[test]
+    fn revises_attr_key_is_known() {
+        let (blocks, diags) = parse("[revises=old-decision]\nParagraph.\n");
+        assert!(diags.is_empty(), "{diags:?}");
+        let entries = &blocks[0].attrs.as_ref().unwrap().entries;
+        assert_eq!(entries[0].0, "revises");
+        assert_eq!(entries[0].1, AttrValue::Single("old-decision".to_string()));
+    }
+
+    /// 未知キーは引き続き `UnknownAttrKey`(revises と1字違いの typo 検出、回帰防止)。
+    #[test]
+    fn unknown_attr_key_still_warns() {
+        let (_, diags) = parse("[revise=old-decision]\nParagraph.\n");
+        assert!(diags.iter().any(|d| d.kind == DiagKind::UnknownAttrKey), "{diags:?}");
     }
 
     #[test]

@@ -24,3 +24,7 @@ node_modules/
 target/
 # Claude Code local settings and runtime files
 .claude/
+
+# G1 WS-B (docs/graph-ui-g1-handoff.md): ui/ のビルド成果物。`strata site` が
+# 合成する入力であり、ソースではないのでコミットしない(pnpm build で再生成する)。
+ui/dist/

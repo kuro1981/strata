@@ -4,7 +4,8 @@
 //! Typst を一次レンダラとする(D19)。strata-html は凍結対象で本クレートは触れない。
 //!
 //! 描画が辿るのは `Rel::Contains` のみ(D-R2 6.): supports/depends-on/cites/
-//! RefersTo/TermRef はグラフの意味情報であり紙面には出さない。
+//! RefersTo/TermRef/Revises(sml-spec §1.13 D48)はグラフの意味情報であり紙面には
+//! 出さない。
 
 use std::collections::{HashMap, HashSet};
 use strata_core::{

@@ -296,19 +296,21 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// ブロック前置属性行の意味エッジ(supports/depends-on/cites、sml-spec §4.1)と
-    /// class タグ(D23)を materialise する。`id`/`alias` キーは Pass 1 が既に消費済み
-    /// なのでここでは無視、カタログに無いキーも(将来拡張の前方互換のため)黙って無視する。
+    /// ブロック前置属性行の意味エッジ(supports/depends-on/cites/revises、
+    /// sml-spec §4.1・§1.13 D48)と class タグ(D23)を materialise する。
+    /// `id`/`alias` キーは Pass 1 が既に消費済みなのでここでは無視、カタログに
+    /// 無いキーも(将来拡張の前方互換のため)黙って無視する。
     fn apply_block_attrs(&mut self, from: NodeId, attrs: &Option<AttrLine>) {
         let Some(al) = attrs else { return };
         for (key, value, span) in &al.entries {
             match key.as_str() {
-                "supports" | "depends-on" | "cites" => {
+                "supports" | "depends-on" | "cites" | "revises" => {
                     let rel = match key.as_str() {
                         "supports" => Rel::Supports,
                         "depends-on" => Rel::DependsOn,
                         "cites" => Rel::Cites,
-                        _ => unreachable!("外側の match で3キーに限定済み"),
+                        "revises" => Rel::Revises,
+                        _ => unreachable!("外側の match で4キーに限定済み"),
                     };
                     for token in attr_value_tokens(value) {
                         let to = self.resolve_attr_target(&token, *span);
@@ -344,7 +346,7 @@ impl<'a> Builder<'a> {
     }
 
     /// `ULID / エイリアス / <文書alias>/<ブロックalias> / term:<用語名>` トークンを
-    /// 解決する(属性行の値用: supports=/depends-on=/cites=)。属性値は strata-sml 層
+    /// 解決する(属性行の値用: supports=/depends-on=/cites=/revises=)。属性値は strata-sml 層
     /// では単なる自由文字列(字句検証は行われない、WP-W1 裁量)なので、doc 修飾の
     /// 検出(`/` 分割)はここで行う。
     fn resolve_attr_target(&mut self, token: &str, span: Span) -> NodeId {

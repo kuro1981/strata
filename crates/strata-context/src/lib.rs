@@ -323,6 +323,7 @@ pub(crate) fn rel_str(rel: Rel) -> &'static str {
         Rel::Cites => "cites",
         Rel::InstanceOf => "instance-of",
         Rel::RefersTo => "refers-to",
+        Rel::Revises => "revises",
     }
 }
 

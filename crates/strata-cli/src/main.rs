@@ -32,6 +32,11 @@ enum Command {
     /// (ULID-addressable Markdown + semantic edge listing, D36). See
     /// docs/context-m5a-handoff.md.
     Context(ContextArgs),
+    /// Build a self-contained static site: graph.json (build output, normalised to a
+    /// uniform shape for both single-file and --workspace) + the pre-built graph-UI
+    /// SPA (`ui/dist`), combined into one output directory (G1 WS-B, sml-spec.md
+    /// §1.13 D49/D50). See docs/graph-ui-g1-handoff.md.
+    Site(SiteArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -171,6 +176,30 @@ struct ContextArgs {
     class: Option<String>,
 }
 
+#[derive(ClapArgs, Debug)]
+struct SiteArgs {
+    /// SML file to build (omit when using --workspace)
+    file: Option<PathBuf>,
+
+    /// Build a workspace instead of a single file: path to a strata.toml.
+    /// Mutually exclusive with `file`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Output directory. `graph.json` and the built UI assets (`ui/dist`) are
+    /// written here together (self-contained: open `<output>/index.html` directly
+    /// or serve the directory — no server-side logic required, D50).
+    #[arg(short, long)]
+    output: PathBuf,
+
+    /// Override the built UI assets directory to copy from (default:
+    /// `<repo root>/ui/dist`, resolved relative to this crate at compile time —
+    /// see docs/graph-ui-g1-handoff.md WS-B). Mainly useful for testing against a
+    /// UI build that lives elsewhere.
+    #[arg(long = "ui-dist")]
+    ui_dist: Option<PathBuf>,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -179,6 +208,7 @@ fn main() {
         Command::Render(render_args) => run_render(render_args),
         Command::View(view_args) => run_view(view_args),
         Command::Context(context_args) => run_context(context_args),
+        Command::Site(site_args) => run_site(site_args),
     }
 }
 
@@ -1076,5 +1106,165 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let tmp_path = dir.join(format!(".{}.tmp.{}", file_name.to_string_lossy(), std::process::id()));
     fs::write(&tmp_path, contents)?;
     fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+// --- `strata site`(G1 WS-B、docs/graph-ui-g1-handoff.md、sml-spec.md §1.13 D49/D50) ---
+
+/// `strata site` が書き出す graph.json のトップレベル形。単一ファイル/ワークスペース
+/// どちらの build 結果でも同じ形(`graph`/`roots`/`doc_aliases`)に正規化する(裁量:
+/// `strata_build::BuildOutput` と `WorkspaceBuildOutput` は形が違う — WP-W2.4 の
+/// `DocRoot` 相当を単一ファイルでも合成することで、UI 側(ui/src/types/graph.ts)は
+/// 常に1つの TypeScript 型だけを相手にできる)。`warnings` は含めない(CLI が既に
+/// stderr に出している。graph.json は UI 用の静的資産に徹する)。
+#[derive(serde::Serialize)]
+struct SiteGraphJson {
+    graph: strata_core::Graph,
+    roots: Vec<SiteRoot>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    doc_aliases: BTreeMap<String, BTreeMap<String, strata_core::NodeId>>,
+}
+
+/// `strata_build::workspace::DocRoot` と同じ形(`path`/`alias`/`root`)の裁量による
+/// 単純写し。単一ファイル build 用にも同じ形で合成する。
+#[derive(serde::Serialize)]
+struct SiteRoot {
+    path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    alias: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    root: Option<strata_core::NodeId>,
+}
+
+/// `strata site` サブコマンド。内部で `strata_build::build`(または `--workspace` なら
+/// `build_workspace`)→ `graph.json` 書き出し → ビルド済み UI 資産(`ui/dist`)を
+/// 出力ディレクトリへ合成する。exit code: 0 成功 / 1 I/O 失敗 / 2 SML を読めない・
+/// パースできない、または UI 資産(`ui/dist`)が無い(前提条件エラーとして他の
+/// usage エラーと同じ 2 に揃えた。裁量)。
+fn run_site(args: SiteArgs) {
+    let ui_dist = args.ui_dist.clone().unwrap_or_else(default_ui_dist);
+    if !ui_dist.is_dir() {
+        eprintln!(
+            "UI 資産が見つかりません: {}\n`ui/` で `pnpm install && pnpm build` を先に実行してください(docs/graph-ui-g1-handoff.md WS-B)。",
+            ui_dist.display()
+        );
+        std::process::exit(2);
+    }
+
+    let site_graph = match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members) => build_site_graph_workspace(members),
+        InputMode::Single(file) => build_site_graph_single(file),
+    };
+
+    if let Err(e) = fs::create_dir_all(&args.output) {
+        eprintln!("Failed to create output directory {}: {}", args.output.display(), e);
+        std::process::exit(1);
+    }
+
+    if let Err(e) = copy_dir_recursive(&ui_dist, &args.output) {
+        eprintln!("Failed to copy UI assets from {} to {}: {}", ui_dist.display(), args.output.display(), e);
+        std::process::exit(1);
+    }
+
+    let json = match serde_json::to_string_pretty(&site_graph) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("Failed to serialize graph JSON: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = write_atomic(&args.output.join("graph.json"), &json) {
+        eprintln!("Failed to write graph.json: {}", e);
+        std::process::exit(1);
+    }
+
+    std::process::exit(0);
+}
+
+/// 単一ファイル build から `SiteGraphJson` を合成する。文書 alias
+/// (`SiteRoot::alias`)は root ノード自身の解決済み alias(D26)をそのまま使う —
+/// ワークスペース側の `DocRoot::alias`(フロントマターの alias)と同じ意味になる。
+fn build_site_graph_single(file: PathBuf) -> SiteGraphJson {
+    let src = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let out = match strata_build::build(&src) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    print_warnings(&out.warnings, &src);
+
+    let alias = out.root.and_then(|id| out.graph.nodes.get(&id)).and_then(|n| n.alias.clone());
+    let path = file.to_string_lossy().into_owned();
+
+    SiteGraphJson {
+        graph: out.graph,
+        roots: vec![SiteRoot { path, alias, root: out.root }],
+        doc_aliases: BTreeMap::new(),
+    }
+}
+
+/// ワークスペース build から `SiteGraphJson` を合成する(`WorkspaceBuildOutput` を
+/// ほぼそのまま写すだけ — `warnings` を落とす点のみが違う)。
+fn build_site_graph_workspace(members: Vec<strata_build::Member>) -> SiteGraphJson {
+    let sources: BTreeMap<String, String> = members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    let out = match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    for w in &out.warnings {
+        let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+        eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+    }
+
+    SiteGraphJson {
+        graph: out.graph,
+        roots: out.roots.into_iter().map(|r| SiteRoot { path: r.path, alias: r.alias, root: r.root }).collect(),
+        doc_aliases: out.doc_aliases,
+    }
+}
+
+/// `ui/dist` の既定位置: このクレート(`crates/strata-cli`)からリポジトリルート経由で
+/// `ui/dist` へ(裁量: コンパイル時の `CARGO_MANIFEST_DIR` に焼き込む。このモノレポの
+/// 開発用途では常に正しく解決できる一方、切り離して配布するバイナリでは通用しない
+/// — 既知の制限として最終報告に明記、G2 で作り直す前提)。
+fn default_ui_dist() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("ui").join("dist")
+}
+
+/// `ui/dist` の中身を出力ディレクトリへ再帰コピーする(シンボリックリンクは
+/// vite のビルド成果物に現れない想定なので扱わない)。
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            fs::create_dir_all(&target)?;
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
     Ok(())
 }

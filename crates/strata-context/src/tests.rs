@@ -259,3 +259,37 @@ fn class_scope_container_chunking_is_deterministic() {
     let b = render_context(&build, &opts).unwrap();
     assert_eq!(a, b);
 }
+
+// --- D48: rel `revises` ------------------------------------------------------------
+
+/// `revises=` 属性が張るエッジが `context` の「エッジ」節に `revises:` として現れ、
+/// `--node --hops 1` の近傍(意味エッジ経由の隣接ノード)としても辿れること
+/// (sml-spec.md §1.13 D48。WS-A 検証項目)。
+const REVISES_FIXTURE: &str = "---\n\
+id: 01HZZZZZZZZZZZZZZZZZZZZZZ0\n\
+---\n\
+\n\
+# 文書 {#01HZZZZZZZZZZZZZZZZZZZZZZ1}\n\
+\n\
+## 旧裁定 {#01HZZZZZZZZZZZZZZZZZZZZZZ2 alias=old-decision}\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ3, revises=old-decision]\n\
+新裁定は旧裁定を改定する。\n";
+
+#[test]
+fn revises_edge_appears_in_edges_section() {
+    let build = strata_build::build(REVISES_FIXTURE).unwrap();
+    let out = render_context(&build, &ContextOptions::default()).unwrap();
+    assert!(out.contains("revises:"), "エッジ節に revises: が出るはず:\n{out}");
+}
+
+#[test]
+fn revises_edge_is_reachable_via_node_scope_one_hop() {
+    let build = strata_build::build(REVISES_FIXTURE).unwrap();
+    let opts = ContextOptions { nodes: vec!["old-decision".to_string()], hops: 1, class: None };
+    let out = render_context(&build, &opts).unwrap();
+    assert!(
+        out.contains("新裁定は旧裁定を改定する"),
+        "--node old-decision --hops 1 の近傍に revises 元(新裁定)が現れるはず:\n{out}"
+    );
+}
