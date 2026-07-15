@@ -225,6 +225,73 @@ fn quantity_cell_renders_as_value_space_unit() {
     assert!(out.contains("[12 ms]"), "{out}");
 }
 
+// --- Date/Period セル描画(D29、M4y) --------------------------------------------
+
+#[test]
+fn date_and_period_cells_render_as_plain_iso_like_text() {
+    let table_id = NodeId::new();
+    let mut g = Graph::default();
+    let table = Table {
+        rows: vec![Dim { name: "field".into(), members: vec![
+            Member { key: "birth".into(), label: None, children: vec![] },
+            Member { key: "tenure".into(), label: None, children: vec![] },
+        ] }],
+        cols: vec![],
+        cells: vec![
+            Cell {
+                row_path: vec!["birth".into()],
+                col_path: vec![],
+                value: CellValue::Date(strata_core::DateValue { y: 1997, m: 3, d: Some(15) }),
+            },
+            Cell {
+                row_path: vec!["tenure".into()],
+                col_path: vec![],
+                value: CellValue::Period {
+                    from: strata_core::DateValue { y: 2020, m: 10, d: None },
+                    to: None,
+                },
+            },
+        ],
+        caption: None,
+    };
+    g.insert(Node::new(table_id, NodePayload::Table(table)));
+
+    let out = render_to_typst(&g, table_id, "fallback").unwrap();
+    assert!(out.contains("[1997-03-15]"), "{out}");
+    assert!(out.contains("[2020-10 〜 現在]"), "{out}");
+}
+
+// --- Record 描画(D28、M4y) ------------------------------------------------------
+
+#[test]
+fn record_renders_as_two_column_table_with_ordered_entries() {
+    let record_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(
+        record_id,
+        NodePayload::Record(strata_core::Record {
+            entries: vec![
+                strata_core::RecordEntry { key: "姓".into(), value: CellValue::Text { v: "山田".into() } },
+                strata_core::RecordEntry {
+                    key: "生年月日".into(),
+                    value: CellValue::Date(strata_core::DateValue { y: 1997, m: 3, d: Some(15) }),
+                },
+            ],
+        }),
+    ));
+
+    let out = render_to_typst(&g, record_id, "fallback").unwrap();
+    assert!(out.contains("#figure("), "{out}");
+    assert!(out.contains("table("), "{out}");
+    assert!(out.contains(&format!("<{}>", record_id.0)), "{out}");
+    assert!(out.contains("[*姓*], [山田]"), "{out}");
+    assert!(out.contains("[*生年月日*], [1997-03-15]"), "{out}");
+    // 姓 が 生年月日 より先に出力されること(順序保存)。
+    let pos_sei = out.find("姓").unwrap();
+    let pos_seinengappi = out.find("生年月日").unwrap();
+    assert!(pos_sei < pos_seinengappi, "record entries must render in source order: {out}");
+}
+
 // --- Chart プレースホルダ(D22 4.) ----------------------------------------------
 
 #[test]

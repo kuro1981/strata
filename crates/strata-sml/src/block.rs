@@ -21,6 +21,7 @@ use crate::ast::{
 use crate::error::{Diag, DiagKind};
 use crate::scan::{fence_kind_word, looks_like_attr_line, split_lines_range, RawBlock, RawKind};
 use crate::span::Span;
+use crate::value::DateFormat;
 
 /// 層Aの `RawBlock` 列を最終的な `SmlBlock` 列に変換する。
 pub(crate) fn build_blocks(src: &str, raw_blocks: Vec<RawBlock>, diags: &mut Vec<Diag>) -> Vec<SmlBlock> {
@@ -60,6 +61,7 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
                 Some("table") => FenceKind::Table,
                 Some("math") => FenceKind::Math,
                 Some("figure") => FenceKind::Figure,
+                Some("record") => FenceKind::Record,
                 _ => unreachable!("scan.rs はフェンス種別を検証済みのはず"),
             };
             let (_, id_tag) = extract_trailing_id_tag(src, marker_line_span, diags);
@@ -78,10 +80,15 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
             }
             let body = match fence_kind {
                 FenceKind::Table => {
-                    FenceBody::Table(crate::table::parse_table_body(src, remaining_body, diags))
+                    let date_format = extract_date_format(&fence_attrs, diags);
+                    FenceBody::Table(crate::table::parse_table_body(src, remaining_body, date_format, diags))
                 }
                 FenceKind::Math => FenceBody::MathTex(remaining_body),
                 FenceKind::Figure => FenceBody::Figure,
+                FenceKind::Record => {
+                    let date_format = extract_date_format(&fence_attrs, diags);
+                    FenceBody::Record(crate::record::parse_record_body(src, remaining_body, date_format, diags))
+                }
             };
             BlockKind::Fence(FenceBlock { fence_kind, id_tag, fence_attrs, body })
         }
@@ -563,8 +570,9 @@ fn parse_attr_value(value_raw: &str) -> AttrValue {
 ///
 /// - `::figure` は本体が属性行のみで完結する(sml-spec §6.3)ため、空行を挟みつつ
 ///   本体全体を属性行として読み切る
-/// - `::table` / `::math` は先頭の連続属性行(間の空行は許容)だけを読み、
-///   それ以降は本体としてそのまま次の層(table.rs / MathTex span)に渡す
+/// - `::table` / `::math` / `::record`(D28)は先頭の連続属性行(間の空行は許容)
+///   だけを読み、それ以降は本体としてそのまま次の層(table.rs / MathTex span /
+///   record.rs)に渡す
 fn split_fence_attrs(
     src: &str,
     body_span: Span,
@@ -602,6 +610,48 @@ fn split_fence_attrs(
         }
     }
     (attrs, Span::new(last_consumed_full_end, body_span.end))
+}
+
+/// フェンス内属性行から `date-format=` を読み取る(D29、sml-spec §1.5)。`::table` /
+/// `::record` の両方が使う共通ロジック。未対応の値は `BadDateFormat` を積んで
+/// `None`(既定の ISO のみへフォールバック — 診断は出すが処理は止めない)。
+/// `date-format` キーが複数回宣言されていた場合は最初の1件だけを採用する
+/// (裁量: フロントマターの「後勝ち」とは逆だが、後続の重複は単に無視するだけで
+/// 診断はしない — 後勝ちにする実益が薄いための簡易化)。
+fn extract_date_format(fence_attrs: &[AttrLine], diags: &mut Vec<Diag>) -> Option<DateFormat> {
+    for al in fence_attrs {
+        for (key, value, span) in &al.entries {
+            if key != "date-format" {
+                continue;
+            }
+            let raw = match value {
+                AttrValue::Quoted(s) => s.clone(),
+                AttrValue::Single(s) => s.clone(),
+                AttrValue::List(_) => {
+                    diags.push(Diag::new(
+                        DiagKind::BadDateFormat,
+                        *span,
+                        "date-format はリスト値にできません".to_string(),
+                    ));
+                    return None;
+                }
+            };
+            return match crate::value::parse_date_format(&raw) {
+                Some(fmt) => Some(fmt),
+                None => {
+                    diags.push(Diag::new(
+                        DiagKind::BadDateFormat,
+                        *span,
+                        format!(
+                            "未対応の date-format '{raw}' です(対応: \"YYYY年M月\" / \"YYYY年M月D日\")"
+                        ),
+                    ));
+                    None
+                }
+            };
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -871,6 +921,79 @@ mod tests {
                 }
             }
             _ => panic!("expected fence"),
+        }
+    }
+
+    // ---- D28: `::record` フェンスの block 層配線 -----------------------------------
+
+    #[test]
+    fn record_fence_marker_id_tag_forms() {
+        let src = "::record {#basic-info}\n姓: 山田\n::\n";
+        let (blocks, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &blocks[0].kind {
+            BlockKind::Fence(fb) => {
+                assert_eq!(fb.fence_kind, crate::ast::FenceKind::Record);
+                assert_eq!(fb.id_tag.as_ref().unwrap().id, RefTarget::Label("basic-info".into()));
+                match &fb.body {
+                    crate::ast::FenceBody::Record(rb) => {
+                        assert_eq!(rb.entries.len(), 1);
+                        assert_eq!(rb.entries[0].key, "姓");
+                    }
+                    other => panic!("expected record body, got {other:?}"),
+                }
+            }
+            other => panic!("expected fence, got {other:?}"),
+        }
+    }
+
+    /// D29: フェンス属性 `date-format=` が record の値パースに配線されていること
+    /// (extract_date_format 経由。value.rs / record.rs のテストは date_format を
+    /// 直接渡しているため、ここで attr 文字列からの配線を別途確認する)。
+    #[test]
+    fn record_date_format_attr_is_wired_into_value_parsing() {
+        let src = "::record\n[date-format=\"YYYY年M月\"]\n在籍期間: 2020年10月\n::\n";
+        let (blocks, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &blocks[0].kind {
+            BlockKind::Fence(fb) => match &fb.body {
+                crate::ast::FenceBody::Record(rb) => {
+                    assert_eq!(
+                        rb.entries[0].value,
+                        crate::ast::CellRaw::Date(crate::ast::DateRaw { y: 2020, m: 10, d: None })
+                    );
+                }
+                other => panic!("expected record body, got {other:?}"),
+            },
+            other => panic!("expected fence, got {other:?}"),
+        }
+    }
+
+    /// D29: 未対応の `date-format=` 値は `BadDateFormat`(処理は止めず None にフォールバック)。
+    #[test]
+    fn unsupported_date_format_value_is_diagnosed() {
+        let src = "::record\n[date-format=\"MM/DD/YYYY\"]\n日付: 何か\n::\n";
+        let (_, diags) = parse(src);
+        assert!(diags.iter().any(|d| d.kind == DiagKind::BadDateFormat), "{diags:?}");
+    }
+
+    /// table フェンスにも `date-format=` が配線されること(D29「表セルと record 値で共通」)。
+    #[test]
+    fn table_date_format_attr_is_wired_into_cell_parsing() {
+        let src = "::table\n[date-format=\"YYYY年M月D日\"]\n@cells:\n  a | b : 2020年10月1日\n::\n";
+        let (blocks, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &blocks[0].kind {
+            BlockKind::Fence(fb) => match &fb.body {
+                crate::ast::FenceBody::Table(tb) => {
+                    assert_eq!(
+                        tb.cells[0].value,
+                        crate::ast::CellRaw::Date(crate::ast::DateRaw { y: 2020, m: 10, d: Some(1) })
+                    );
+                }
+                other => panic!("expected table body, got {other:?}"),
+            },
+            other => panic!("expected fence, got {other:?}"),
         }
     }
 

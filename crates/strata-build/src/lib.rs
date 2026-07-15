@@ -12,6 +12,7 @@
 
 mod convert;
 mod error;
+mod list_child;
 mod math;
 mod resolve;
 mod term;

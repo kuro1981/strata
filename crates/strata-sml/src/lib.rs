@@ -20,9 +20,11 @@ pub mod error;
 pub mod fmt;
 pub(crate) mod frontmatter;
 pub mod inline;
+pub mod record;
 pub mod scan;
 pub mod span;
 pub mod table;
+pub mod value;
 
 pub use ast::*;
 pub use error::{Diag, DiagKind, Severity};

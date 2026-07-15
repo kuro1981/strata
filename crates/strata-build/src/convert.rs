@@ -7,21 +7,22 @@
 use std::collections::{BTreeMap, HashMap};
 
 use strata_sml::{
-    AttrLine, AttrValue, BlockKind, CellEntry, CellRaw, DimNode, FenceBlock, FenceBody, MemberNode, RefScheme,
-    RefTarget, SmlBlock, SmlDocument, SmlInline, Span,
+    AttrLine, AttrValue, BlockKind, CellEntry, CellRaw, DateRaw, DimNode, FenceBlock, FenceBody, MemberNode,
+    RecordEntry as SmlRecordEntry, RefScheme, RefTarget, SmlBlock, SmlDocument, SmlInline, Span,
 };
 use strata_sml::EmphKind as SmlEmphKind;
 
 use strata_core::{
-    Cell, CellValue, Chart, Code, Dim, Document, EmphKind as CoreEmphKind, Encoding, Figure, Graph, ImageFigure,
-    Inline, List as CoreList, Mark, MathBlock, Member, Node, NodeId, NodePayload, Para, Rel, Section, Table, Term,
+    Cell, CellValue, Chart, Code, DateValue, Dim, Document, EmphKind as CoreEmphKind, Encoding, Figure, Graph,
+    ImageFigure, Inline, List as CoreList, Mark, MathBlock, Member, Node, NodeId, NodePayload, Para, Record,
+    RecordEntry, Rel, Section, Table, Term,
 };
 use strata_core::CellCoord as CoreCellCoord;
 use ulid::Ulid;
 
 use crate::error::BuildError;
 use crate::resolve::{NodeKindTag, Registration, Registry};
-use crate::{math, term};
+use crate::{list_child, math, term};
 
 struct Builder<'a> {
     src: &'a str,
@@ -44,6 +45,16 @@ pub(crate) fn run(src: &str, doc: &SmlDocument, reg: Registry) -> (Graph, Option
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
     for block in &doc.blocks {
         b.build_block(block, &mut stack, root);
+    }
+
+    // D26(2026-07-15): 解決済みエイリアスを graph JSON に出力する(ビューのアドレス
+    // 規約の柱)。Pass 1(resolve.rs)が集めた「その ID 自身が定義した alias」を
+    // Node.alias へそのまま写す。id_alias は NodeId をキーとする1:1マップなので
+    // 全ノード構築後にまとめて適用できる。
+    for (id, alias) in &b.reg.id_alias {
+        if let Some(node) = b.graph.nodes.get_mut(id) {
+            node.alias = Some(alias.clone());
+        }
     }
 
     (b.graph, root, b.errors)
@@ -103,6 +114,7 @@ impl<'a> Builder<'a> {
                     strata_sml::FenceKind::Table => self.build_table(id, fb),
                     strata_sml::FenceKind::Math => self.build_math(id, fb),
                     strata_sml::FenceKind::Figure => self.build_figure(id, fb, block.span),
+                    strata_sml::FenceKind::Record => self.build_record(id, fb),
                 }
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
@@ -124,7 +136,8 @@ impl<'a> Builder<'a> {
     /// contains され(既存の平坦リストのグラフ表現と同一)、項目が子リストを持てば
     /// 新しい List ノードを**親項目(Para)の子**として contains で接続し再帰する。
     /// ネストした List ノード自体は SML 上に ID を書く場所が無いため、build が
-    /// その場で ID を自動生成する(build ごとに変わる。裁量 — 最終報告に記載)。
+    /// 親項目の ULID + 位置から決定的に導出する(D27、`list_child::derive_list_child_id`。
+    /// D9 の Term 安定 ID と同型)。同一入力を2回 build しても全ノード ID が一致する。
     fn build_list_items(&mut self, parent: NodeId, items: &[strata_sml::ListItem]) {
         for item in items {
             let Registration { id: item_id, .. } = self.reg.by_span[&item.span];
@@ -132,7 +145,9 @@ impl<'a> Builder<'a> {
             self.graph.insert(Node::new(item_id, NodePayload::Para(Para { inline })));
             self.add_contains(parent, item_id);
             if let Some(child) = &item.child {
-                let child_list_id = NodeId::new();
+                // D24 時点では1項目につき子リストは高々1つなので position は常に 0
+                // (list_child.rs のドキュメント参照)。
+                let child_list_id = list_child::derive_list_child_id(item_id, 0);
                 self.graph
                     .insert(Node::new(child_list_id, NodePayload::List(CoreList { ordered: child.ordered })));
                 self.add_contains(item_id, child_list_id);
@@ -324,14 +339,37 @@ impl<'a> Builder<'a> {
     }
 
     fn convert_cell(&mut self, c: &CellEntry) -> Cell {
-        let value = match &c.value {
+        let value = self.convert_cell_raw(&c.value, c.span);
+        Cell { row_path: c.row_path.clone(), col_path: c.col_path.clone(), value }
+    }
+
+    /// `CellRaw` → `CellValue` の型付き変換(D4 + D29)。`::table` の `@cells` と
+    /// `::record` の本体で共有する(sml-spec §1.5「表セルと record 値で共通」)。
+    fn convert_cell_raw(&mut self, v: &CellRaw, span: Span) -> CellValue {
+        match v {
             CellRaw::Number(v) => CellValue::Number { v: *v },
             CellRaw::Quantity { v, unit } => CellValue::Quantity { v: *v, unit: unit.clone() },
             CellRaw::Text(s) => CellValue::Text { v: s.clone() },
             CellRaw::Empty => CellValue::Empty,
-            CellRaw::Ref(target) => CellValue::Ref { to: self.resolve_ref_target(target, c.span) },
-        };
-        Cell { row_path: c.row_path.clone(), col_path: c.col_path.clone(), value }
+            CellRaw::Ref(target) => CellValue::Ref { to: self.resolve_ref_target(target, span) },
+            CellRaw::Date(d) => CellValue::Date(convert_date(d)),
+            CellRaw::Period { from, to } => {
+                CellValue::Period { from: convert_date(from), to: to.as_ref().map(convert_date) }
+            }
+        }
+    }
+
+    /// D28: `::record` の本体をグラフへ格納する。フェンス内属性(`date-format=` 等)は
+    /// 値パース時点(strata-sml 層)で既に消費済みなので、ここでは順序保存列を
+    /// そのまま canonical の `Record` へ写すだけでよい。
+    fn build_record(&mut self, id: NodeId, fb: &FenceBlock) {
+        let FenceBody::Record(rb) = &fb.body else { unreachable!("Record フェンスは常に Record body") };
+        let entries: Vec<RecordEntry> = rb
+            .entries
+            .iter()
+            .map(|e: &SmlRecordEntry| RecordEntry { key: e.key.clone(), value: self.convert_cell_raw(&e.value, e.span) })
+            .collect();
+        self.graph.insert(Node::new(id, NodePayload::Record(Record { entries })));
     }
 
     fn build_math(&mut self, id: NodeId, fb: &FenceBlock) {
@@ -435,6 +473,11 @@ fn fold_depicts(entries: &[&(String, AttrValue, Span)]) -> BTreeMap<String, Stri
         }
     }
     depicts
+}
+
+/// `DateRaw`(strata-sml、層1)→ `DateValue`(strata-core、canonical)の直写し変換(D29)。
+fn convert_date(d: &DateRaw) -> DateValue {
+    DateValue { y: d.y, m: d.m, d: d.d }
 }
 
 fn convert_emph_kind(k: SmlEmphKind) -> CoreEmphKind {

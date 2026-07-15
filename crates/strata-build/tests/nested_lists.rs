@@ -75,6 +75,27 @@ fn nested_item_without_ulid_is_missing_id() {
     assert!(errors.iter().any(|e| matches!(e, BuildError::MissingId { .. })), "{errors:#?}");
 }
 
+/// D27(2026-07-15 裁定): 子 List ノードの ID は親項目の ULID+位置から決定的に
+/// 導出されるため、同一入力を2回 build しても全ノード ID(子リストのIDを含む)が
+/// 一致すること。従来は `NodeId::new()` による乱数採番だったため不一致だった。
+#[test]
+fn child_list_node_id_is_stable_across_repeated_builds() {
+    let list = Ulid::new();
+    let top = Ulid::new();
+    let sub1 = Ulid::new();
+    let src = format!("[id={list}]\n- top {{#{top}}}\n  - sub1 {{#{sub1}}}\n");
+
+    let out1 = build(&src).expect("build 1 must succeed");
+    let out2 = build(&src).expect("build 2 must succeed");
+
+    let child_list_1 = out1.graph.children_of(NodeId(top))[0];
+    let child_list_2 = out2.graph.children_of(NodeId(top))[0];
+    assert_eq!(child_list_1, child_list_2, "child List node ID must be stable across builds");
+
+    // グラフ全体としても完全に一致すること(alias 等の非決定要素が無い前提)。
+    assert_eq!(out1.graph, out2.graph);
+}
+
 /// 回帰(D24): 旧実装で無警告のまま別段落に化けていた不正インデント入力は、
 /// いまや `InconsistentIndent`(Error)のパース診断として build を失敗させる。
 #[test]

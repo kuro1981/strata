@@ -193,6 +193,8 @@ pub enum FenceKind {
     Table,
     Math,
     Figure,
+    /// key-value ブロック(D28、sml-spec §1.5・§6)。
+    Record,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -202,6 +204,25 @@ pub enum FenceBody {
     MathTex(Span),
     /// 属性行のみで完結(本体なし)。
     Figure,
+    /// `::record` 本体(D28)。
+    Record(RecordBody),
+}
+
+// ---- record(sml-spec §1.5、D28)------------------------------------------------
+
+/// `::record` 本体。「キー: 値」の行の順序保存列(D28)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordBody {
+    pub entries: Vec<RecordEntry>,
+}
+
+/// record の1エントリ。キーは自由テキスト(日本語可、表の座標キーとは別物で
+/// パス構文に入らない)。値は表セルと同じ型付きパース(`CellRaw`)を共有する。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordEntry {
+    pub key: String,
+    pub value: CellRaw,
+    pub span: Span,
 }
 
 // ---- 表(sml-spec §6.1、D4)----------------------------------------------------
@@ -244,7 +265,7 @@ pub struct CellEntry {
     pub span: Span,
 }
 
-/// セル値の型付きパース結果(D4)。
+/// セル値 / record 値の型付きパース結果(D4 + D29)。表セルと record 値で共通。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CellRaw {
     Number(f64),
@@ -252,4 +273,17 @@ pub enum CellRaw {
     Text(String),
     Ref(RefTarget),
     Empty,
+    /// 日付(D29)。既定は ISO(`YYYY-MM-DD` / `YYYY-MM`)のみ。フェンス属性
+    /// `date-format=` が宣言されていれば、その追加書式も受理する。
+    Date(DateRaw),
+    /// 期間(D29)。「A 〜 B」「A 〜 現在」(`〜`/`~` 両可)。`to` 無しは「現在」。
+    Period { from: DateRaw, to: Option<DateRaw> },
+}
+
+/// 年月(日)。`d` 無しは「月までの精度」(D29)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DateRaw {
+    pub y: i32,
+    pub m: u32,
+    pub d: Option<u32>,
 }

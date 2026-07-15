@@ -28,6 +28,8 @@ pub(crate) enum NodeKindTag {
     Math,
     Figure,
     Code,
+    /// `::record` フェンス(D28、sml-spec §1.5)。
+    Record,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,6 +43,12 @@ pub(crate) struct Registry {
     /// alias → NodeId。重複がある場合は最初の定義を採用する(重複自体は別途
     /// `DuplicateAlias` として報告されるので、どちらを採用しても最終結果は Err)。
     pub alias_table: HashMap<String, NodeId>,
+    /// NodeId → そのノード自身に定義された alias(D26、sml-spec §1.5)。1つの ID には
+    /// 定義箇所が1つしか無い(alias はその ID を持つブロック自身の `{#ULID alias=x}` /
+    /// `[id=ULID, alias=x]` からしか生まれない)ため、alias_table(alias→id、複数
+    /// alias が同じ id を指しうる)とは逆向きの1:1マップになる。Pass 2(`convert.rs`)が
+    /// `Node.alias` へそのまま写す。
+    pub id_alias: HashMap<NodeId, String>,
     /// NodeId → 種別。scheme(table:/fig:/math:/cell:)の対象ノード型検証に使う。
     pub node_kind: HashMap<NodeId, NodeKindTag>,
     /// フロントマターが有効な ULID の id を持つ場合のみ `Some`。
@@ -51,6 +59,7 @@ pub(crate) fn build_registry(doc: &SmlDocument, errors: &mut Vec<BuildError>) ->
     let mut reg = Registry {
         by_span: HashMap::new(),
         alias_table: HashMap::new(),
+        id_alias: HashMap::new(),
         node_kind: HashMap::new(),
         document_id: None,
     };
@@ -106,6 +115,7 @@ fn register_block(
                 strata_sml::FenceKind::Table => NodeKindTag::Table,
                 strata_sml::FenceKind::Math => NodeKindTag::Math,
                 strata_sml::FenceKind::Figure => NodeKindTag::Figure,
+                strata_sml::FenceKind::Record => NodeKindTag::Record,
             };
             register_line_type(block.span, &fb.id_tag, kind, reg, alias_defs, errors);
         }
@@ -151,6 +161,7 @@ fn register_line_type(
                 if let Some(alias) = &tag.alias {
                     alias_defs.entry(alias.clone()).or_default().push(tag.inner_span);
                     reg.alias_table.entry(alias.clone()).or_insert(id);
+                    reg.id_alias.insert(id, alias.clone());
                 }
             }
             RefTarget::Label(_) => {
@@ -208,6 +219,7 @@ fn register_prose(
     {
         alias_defs.entry(alias.clone()).or_default().push(*alias_span);
         reg.alias_table.entry(alias.clone()).or_insert(id);
+        reg.id_alias.insert(id, alias.clone());
     }
 }
 

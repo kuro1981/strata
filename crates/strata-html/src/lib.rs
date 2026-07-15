@@ -1,5 +1,5 @@
 use strata_core::{
-    Graph, Node, NodeId, NodePayload, Para, Rel, Section, Table, Term, Value, Scalar, Code, List, Anchor, Inline, EmphKind, MathNode, CellValue, DimTree
+    Graph, Node, NodeId, NodePayload, Para, Rel, Section, Table, Term, Value, Scalar, Code, List, Anchor, Inline, EmphKind, MathNode, CellValue, DateValue, DimTree
 };
 use std::collections::HashMap;
 
@@ -262,6 +262,26 @@ impl<'a> HtmlRenderer<'a> {
                 // (strata-build のスコープ境界)。フォールバックとして無視する。
                 Ok(String::new())
             }
+            NodePayload::Record(r) => {
+                // D28(M4y): strata-html は凍結対象(コンパイルを保つための最小維持のみ、
+                // 機能実装はしない)。簡易な key/value のリストとして描画する。
+                let mut out = String::new();
+                out.push_str("<dl class=\"record\">\n");
+                for entry in &r.entries {
+                    let val_str = match &entry.value {
+                        CellValue::Number { v } => v.to_string(),
+                        CellValue::Text { v } => html_escape(v),
+                        CellValue::Ref { .. } => "値".to_string(),
+                        CellValue::Quantity { v, unit } => format!("{} {}", v, html_escape(unit)),
+                        CellValue::Empty => String::new(),
+                        CellValue::Date(d) => html_escape(&format_date(d)),
+                        CellValue::Period { from, to } => html_escape(&format_period(from, to.as_ref())),
+                    };
+                    out.push_str(&format!("  <dt>{}</dt><dd>{}</dd>\n", html_escape(&entry.key), val_str));
+                }
+                out.push_str("</dl>\n");
+                Ok(out)
+            }
         }
     }
 
@@ -501,6 +521,8 @@ impl<'a> HtmlRenderer<'a> {
                         format!("<a href=\"#anchor-{}\">{}</a>", to.0, label)
                     }
                     Some(CellValue::Quantity { v, unit }) => format!("{} {}", v, html_escape(unit)),
+                    Some(CellValue::Date(d)) => html_escape(&format_date(d)),
+                    Some(CellValue::Period { from, to }) => html_escape(&format_period(from, to.as_ref())),
                     Some(CellValue::Empty) | None => "&nbsp;".to_string(),
                 };
 
@@ -512,6 +534,22 @@ impl<'a> HtmlRenderer<'a> {
         out.push_str("</table>\n");
 
         Ok(out)
+    }
+}
+
+/// D29(M4y): 日付の素直な表示。strata-typst の同名ヘルパと同じ形式(裁量: 凍結
+/// クレートなので strata-core 側への共通化はせず、最小限のコピーで済ませる)。
+fn format_date(d: &DateValue) -> String {
+    match d.d {
+        Some(day) => format!("{:04}-{:02}-{:02}", d.y, d.m, day),
+        None => format!("{:04}-{:02}", d.y, d.m),
+    }
+}
+
+fn format_period(from: &DateValue, to: Option<&DateValue>) -> String {
+    match to {
+        Some(t) => format!("{} 〜 {}", format_date(from), format_date(t)),
+        None => format!("{} 〜 現在", format_date(from)),
     }
 }
 

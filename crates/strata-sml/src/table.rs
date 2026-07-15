@@ -25,15 +25,16 @@
 //! - フラット糖衣 `- name: [k1, k2]` の各メンバーには、個々のトークンの位置ではなく
 //!   次元行全体のスパンを割り当てている(fmt がまだこの粒度を必要としないため)。
 
-use ulid::Ulid;
-
-use crate::ast::{CellEntry, CellRaw, DimNode, MemberNode, RefTarget, TableBody};
+use crate::ast::{CellEntry, DimNode, MemberNode, TableBody};
 use crate::error::{Diag, DiagKind};
 use crate::scan::split_lines_range;
 use crate::span::Span;
+use crate::value::DateFormat;
 
 /// `::table` フェンスの本体(フェンス内属性行を除いた残り)をパースする。
-pub fn parse_table_body(src: &str, body: Span, diags: &mut Vec<Diag>) -> TableBody {
+/// `date_format` はフェンス属性 `date-format=` が宣言されていればその追加日付書式
+/// (D29、表セルと record 値で共通の型付きパースを使う。sml-spec §1.5)。
+pub fn parse_table_body(src: &str, body: Span, date_format: Option<DateFormat>, diags: &mut Vec<Diag>) -> TableBody {
     let lines = collect_lines(src, body);
 
     let mut rows = Vec::new();
@@ -63,7 +64,7 @@ pub fn parse_table_body(src: &str, body: Span, diags: &mut Vec<Diag>) -> TableBo
             }
             "@cells:" => {
                 i += 1;
-                cells = parse_cells(&lines, &mut i, diags, 1);
+                cells = parse_cells(&lines, &mut i, date_format, diags, 1);
             }
             other => {
                 diags.push(Diag::new(
@@ -302,7 +303,13 @@ fn split_key_label(tok: &str) -> (String, Option<String>) {
 
 // ---- セル --------------------------------------------------------------------
 
-fn parse_cells(lines: &[TLine], idx: &mut usize, diags: &mut Vec<Diag>, level: usize) -> Vec<CellEntry> {
+fn parse_cells(
+    lines: &[TLine],
+    idx: &mut usize,
+    date_format: Option<DateFormat>,
+    diags: &mut Vec<Diag>,
+    level: usize,
+) -> Vec<CellEntry> {
     let mut cells = Vec::new();
     while *idx < lines.len() {
         let line = &lines[*idx];
@@ -332,7 +339,7 @@ fn parse_cells(lines: &[TLine], idx: &mut usize, diags: &mut Vec<Diag>, level: u
             continue;
         }
         *idx += 1;
-        if let Some(cell) = parse_cell_line(line, diags) {
+        if let Some(cell) = parse_cell_line(line, date_format, diags) {
             cells.push(cell);
         }
     }
@@ -340,7 +347,7 @@ fn parse_cells(lines: &[TLine], idx: &mut usize, diags: &mut Vec<Diag>, level: u
 }
 
 /// セル行 `<行path> | <列path> : <値>` をパースする(sml-spec §7)。
-fn parse_cell_line(line: &TLine, diags: &mut Vec<Diag>) -> Option<CellEntry> {
+fn parse_cell_line(line: &TLine, date_format: Option<DateFormat>, diags: &mut Vec<Diag>) -> Option<CellEntry> {
     let text = line.text;
 
     let Some(pipe_pos) = text.find('|') else {
@@ -367,7 +374,7 @@ fn parse_cell_line(line: &TLine, diags: &mut Vec<Diag>) -> Option<CellEntry> {
 
     let row_path = parse_cell_path(row_part, line.span, diags)?;
     let col_path = parse_cell_path(col_part, line.span, diags)?;
-    let value = parse_cell_value(value_part);
+    let value = crate::value::parse_typed_value(value_part, date_format, line.span, diags);
 
     Some(CellEntry { row_path, col_path, value, span: line.span })
 }
@@ -390,65 +397,18 @@ fn parse_cell_path(s: &str, line_span: Span, diags: &mut Vec<Diag>) -> Option<Ve
     Some(parts.into_iter().map(|p| p.to_string()).collect())
 }
 
-/// セル値の型付きパース(D4、sml-spec §6.1 の表)。
-fn parse_cell_value(raw: &str) -> CellRaw {
-    let s = raw.trim();
-    if s.is_empty() || s == "~" {
-        return CellRaw::Empty;
-    }
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
-        return CellRaw::Text(s[1..s.len() - 1].to_string());
-    }
-    if let Some(target) = s.strip_prefix("ref:") {
-        return CellRaw::Ref(parse_ref_target(target.trim()));
-    }
-
-    let tokens: Vec<&str> = s.split_whitespace().collect();
-    if tokens.len() == 2
-        && let Ok(v) = tokens[0].parse::<f64>()
-        && is_valid_unit_token(tokens[1])
-    {
-        return CellRaw::Quantity { v, unit: tokens[1].to_string() };
-    }
-    if tokens.len() == 1
-        && let Ok(v) = tokens[0].parse::<f64>()
-    {
-        return CellRaw::Number(v);
-    }
-
-    // 裸の非数値テキストは寛容にフォールバック(D4)。
-    CellRaw::Text(s.to_string())
-}
-
-/// 単位トークンの字句(裁量、モジュール冒頭のドキュメント参照)。
-/// `[A-Za-zµ%°]` で始まり、`[A-Za-z0-9/^·%°-]*` が続く。
-fn is_valid_unit_token(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || matches!(c, 'µ' | '%' | '°') => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '^' | '·' | '%' | '°' | '-'))
-}
-
 fn is_valid_key_charset(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-fn parse_ref_target(token: &str) -> RefTarget {
-    match token.parse::<Ulid>() {
-        Ok(u) => RefTarget::Ulid(u),
-        Err(_) => RefTarget::Label(token.to_string()),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{CellRaw, RefTarget};
 
     fn body(src: &str) -> (TableBody, Vec<Diag>) {
         let mut diags = Vec::new();
-        let table = parse_table_body(src, Span::new(0, src.len()), &mut diags);
+        let table = parse_table_body(src, Span::new(0, src.len()), None, &mut diags);
         (table, diags)
     }
 
@@ -521,17 +481,38 @@ mod tests {
         assert_eq!(t.cells[0].col_path, vec!["model".to_string(), "x".to_string()]);
     }
 
+    // セル値の型付きパースそのもの(D4/D29の6+2種)は crate::value のテストが
+    // 網羅する(table.rs / record.rs で共有するロジックのため)。ここでは
+    // `@cells:` セクション経由での配線(date_format の伝播含む)だけを確認する。
+
     #[test]
-    fn cell_value_six_types() {
-        assert_eq!(parse_cell_value("0.82"), CellRaw::Number(0.82));
-        assert_eq!(parse_cell_value("-3"), CellRaw::Number(-3.0));
-        assert_eq!(parse_cell_value("1e5"), CellRaw::Number(1e5));
-        assert_eq!(parse_cell_value("45 ms"), CellRaw::Quantity { v: 45.0, unit: "ms".to_string() });
-        assert_eq!(parse_cell_value("\"任意の テキスト\""), CellRaw::Text("任意の テキスト".to_string()));
-        assert_eq!(parse_cell_value("some text"), CellRaw::Text("some text".to_string()));
-        assert_eq!(parse_cell_value("~"), CellRaw::Empty);
-        assert_eq!(parse_cell_value(""), CellRaw::Empty);
-        assert_eq!(parse_cell_value("ref:eval-table"), CellRaw::Ref(RefTarget::Label("eval-table".to_string())));
+    fn cell_value_types_wired_through_cells_section() {
+        let src = "@cells:\n  a | b : 0.82\n  a | c : 45 ms\n  a | d : \"任意の テキスト\"\n  a | e : ~\n  a | f : ref:eval-table\n";
+        let (t, diags) = body(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(t.cells.len(), 5);
+        assert_eq!(t.cells[0].value, CellRaw::Number(0.82));
+        assert_eq!(t.cells[1].value, CellRaw::Quantity { v: 45.0, unit: "ms".to_string() });
+        assert_eq!(t.cells[2].value, CellRaw::Text("任意の テキスト".to_string()));
+        assert_eq!(t.cells[3].value, CellRaw::Empty);
+        assert_eq!(t.cells[4].value, CellRaw::Ref(RefTarget::Label("eval-table".to_string())));
+    }
+
+    #[test]
+    fn date_format_is_threaded_into_cell_parsing() {
+        let mut diags = Vec::new();
+        let src = "@cells:\n  a | b : 1997年3月\n";
+        let t = parse_table_body(
+            src,
+            Span::new(0, src.len()),
+            Some(crate::value::DateFormat::YearMonthJa),
+            &mut diags,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            t.cells[0].value,
+            CellRaw::Date(crate::ast::DateRaw { y: 1997, m: 3, d: None })
+        );
     }
 
     #[test]

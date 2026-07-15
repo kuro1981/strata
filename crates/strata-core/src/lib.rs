@@ -61,14 +61,19 @@ pub struct Node {
     /// 後方互換フィールド(空なら旧形式 JSON と同じ形にシリアライズされる)。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub classes: Vec<String>,
+    /// 解決済みエイリアス(D26、sml-spec §1.5)。fmt が `{#ULID alias=x}` /
+    /// `[id=ULID, alias=x]` で注入したものを build がそのまま写す。ビューのアドレス
+    /// 規約の柱(alias を graph JSON から直接引けるようにする)。後方互換フィールド。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
     #[serde(flatten)]
     pub payload: NodePayload,
 }
 
 impl Node {
-    /// class 無しでノードを作る通常コンストラクタ。
+    /// class・alias 無しでノードを作る通常コンストラクタ。
     pub fn new(id: NodeId, payload: NodePayload) -> Self {
-        Node { id, classes: Vec::new(), payload }
+        Node { id, classes: Vec::new(), alias: None, payload }
     }
 }
 
@@ -89,6 +94,22 @@ pub enum NodePayload {
     Value(Value),
     /// フロントマターに対応する文書ルート(D12)。トップレベルブロックを contains する。
     Document(Document),
+    /// key-value ブロック(D28、sml-spec §1.5・§6)。`::record` フェンスの canonical
+    /// 表現。キーは自由テキスト(日本語可、表の座標キーとは別物でパス構文に入らない)。
+    Record(Record),
+}
+
+/// `::record` フェンスの本体(D28)。キーと値の順序保存列(sml-spec §1.5)。
+/// 重複キーはパーサが `Warning` 診断を出すが、データは失わず全件保持する。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Record {
+    pub entries: Vec<RecordEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordEntry {
+    pub key: String,
+    pub value: CellValue,
 }
 
 /// フロントマターに対応する文書ルートノード(§9-5)。
@@ -287,6 +308,25 @@ pub enum CellValue {
     Empty,
     /// 数量(数値+単位)。SML の型付きパース規則(D4)の canonical 表現(§9-3)。
     Quantity { v: f64, unit: String },
+    /// 日付(D29)。既定は ISO(`YYYY-MM-DD` / `YYYY-MM`)のみを受理する型付きパース結果。
+    Date(DateValue),
+    /// 期間(D29)。`to` 無しは「現在」(継続中)を表す。
+    Period {
+        from: DateValue,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        to: Option<DateValue>,
+    },
+}
+
+/// 年月(日)。`d` 無しは「月までの精度」(D29)。`Period.from`/`Period.to` と単独の
+/// `CellValue::Date` の両方で共有する(裁量: sml-spec D29 は `Date { y, m, d? }` を
+/// 直書きで示すが、Period 側との重複を避けるためこの共有構造体に落とした)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DateValue {
+    pub y: i32,
+    pub m: u32,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub d: Option<u32>,
 }
 
 /// セル参照(`cell:`)の座標(§5.3, §9-2)。
@@ -797,6 +837,7 @@ mod tests {
         let with_classes = Node {
             id: NodeId::new(),
             classes: vec!["note".to_string(), "actual-name".to_string()],
+            alias: None,
             payload: NodePayload::Para(Para { inline: vec![] }),
         };
         let json = serde_json::to_string(&with_classes).unwrap();
@@ -807,5 +848,89 @@ mod tests {
         let without_classes = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![] }));
         let json = serde_json::to_string(&without_classes).unwrap();
         assert!(!json.contains("classes"), "{json}");
+    }
+
+    // --- D26(2026-07-15): Node.alias の後方互換性 -----------------------------------
+
+    /// 旧形式(alias フィールド自体が無い)の Node JSON が読め、alias が None で
+    /// 補完されること(既存ゴールデン JSON を壊さないための後方互換、D26)。
+    #[test]
+    fn node_deserializes_legacy_json_without_alias() {
+        let id = NodeId::new();
+        let legacy = format!(r#"{{"id":"{}","type":"document"}}"#, id.0);
+        let parsed: Node = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(parsed.alias, None);
+    }
+
+    /// alias ありの往復。alias が None なら "alias" が出力に現れないこと。
+    #[test]
+    fn node_alias_roundtrip_and_omitted_when_none() {
+        let with_alias = Node {
+            id: NodeId::new(),
+            classes: Vec::new(),
+            alias: Some("eval-table".to_string()),
+            payload: NodePayload::Para(Para { inline: vec![] }),
+        };
+        let json = serde_json::to_string(&with_alias).unwrap();
+        assert!(json.contains(r#""alias":"eval-table""#), "{json}");
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_alias, back);
+
+        let without_alias = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![] }));
+        let json = serde_json::to_string(&without_alias).unwrap();
+        assert!(!json.contains("alias"), "{json}");
+    }
+
+    // --- D28(2026-07-15): NodePayload::Record の往復 --------------------------------
+
+    #[test]
+    fn record_node_roundtrips() {
+        let record = Record {
+            entries: vec![
+                RecordEntry { key: "姓".to_string(), value: CellValue::Text { v: "山田".to_string() } },
+                RecordEntry {
+                    key: "生年月日".to_string(),
+                    value: CellValue::Date(DateValue { y: 1997, m: 3, d: Some(15) }),
+                },
+            ],
+        };
+        let node = Node::new(NodeId::new(), NodePayload::Record(record));
+        let json = serde_json::to_string(&node).unwrap();
+        let back: Node = serde_json::from_str(&json).unwrap();
+        assert_eq!(node, back);
+    }
+
+    // --- D29(2026-07-15): CellValue::Date / Period の往復と精度(d 省略) --------------
+
+    #[test]
+    fn cell_value_date_roundtrips_with_and_without_day() {
+        let with_day = CellValue::Date(DateValue { y: 2026, m: 7, d: Some(15) });
+        let json = serde_json::to_string(&with_day).unwrap();
+        assert!(json.contains(r#""d":15"#), "{json}");
+        let back: CellValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(with_day, back);
+
+        let month_only = CellValue::Date(DateValue { y: 1997, m: 3, d: None });
+        let json = serde_json::to_string(&month_only).unwrap();
+        assert!(!json.contains(r#""d":"#), "{json}");
+        let back: CellValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(month_only, back);
+    }
+
+    #[test]
+    fn cell_value_period_roundtrips_with_and_without_to() {
+        let ongoing = CellValue::Period { from: DateValue { y: 2020, m: 10, d: None }, to: None };
+        let json = serde_json::to_string(&ongoing).unwrap();
+        assert!(!json.contains(r#""to""#), "{json}");
+        let back: CellValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(ongoing, back);
+
+        let closed = CellValue::Period {
+            from: DateValue { y: 1997, m: 3, d: None },
+            to: Some(DateValue { y: 2020, m: 10, d: None }),
+        };
+        let json = serde_json::to_string(&closed).unwrap();
+        let back: CellValue = serde_json::from_str(&json).unwrap();
+        assert_eq!(closed, back);
     }
 }

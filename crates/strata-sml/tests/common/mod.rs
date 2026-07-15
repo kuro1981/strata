@@ -22,7 +22,7 @@
 
 use strata_sml::{
     AttrLine, AttrValue, BlockKind, CellEntry, CellRaw, DimNode, EmphKind, FenceBody, FenceKind, MemberNode,
-    RefScheme, RefTarget, SmlBlock, SmlDocument, SmlInline, TableBody,
+    RecordBody, RecordEntry, RefScheme, RefTarget, SmlBlock, SmlDocument, SmlInline, TableBody,
 };
 
 /// `docs/` 配下のファイルをリポジトリルート相対で読み込む(ゴールデンfixture用)。
@@ -128,10 +128,25 @@ pub fn norm_table(tb: &TableBody) -> NTableBody {
 }
 
 #[derive(Debug, PartialEq)]
+pub struct NRecordEntry {
+    pub key: String,
+    pub value: CellRaw,
+}
+
+pub fn norm_record_entry(e: &RecordEntry) -> NRecordEntry {
+    NRecordEntry { key: e.key.clone(), value: e.value.clone() }
+}
+
+pub fn norm_record(rb: &RecordBody) -> Vec<NRecordEntry> {
+    rb.entries.iter().map(norm_record_entry).collect()
+}
+
+#[derive(Debug, PartialEq)]
 pub enum NFenceBody {
     Table(NTableBody),
     MathTex(String),
     Figure,
+    Record(Vec<NRecordEntry>),
 }
 
 pub fn norm_fence_body(src: &str, body: &FenceBody) -> NFenceBody {
@@ -139,6 +154,7 @@ pub fn norm_fence_body(src: &str, body: &FenceBody) -> NFenceBody {
         FenceBody::Table(tb) => NFenceBody::Table(norm_table(tb)),
         FenceBody::MathTex(sp) => NFenceBody::MathTex(sp.slice(src).to_string()),
         FenceBody::Figure => NFenceBody::Figure,
+        FenceBody::Record(rb) => NFenceBody::Record(norm_record(rb)),
     }
 }
 

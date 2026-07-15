@@ -8,8 +8,8 @@
 
 use std::collections::{HashMap, HashSet};
 use strata_core::{
-    CellCoord, CellValue, Chart, DimTree, EmphKind, Figure, Graph, ImageFigure, Inline, List, Mark, MathNode,
-    NodeId, NodePayload, Scalar, Table, Term,
+    CellCoord, CellValue, Chart, DateValue, DimTree, EmphKind, Figure, Graph, ImageFigure, Inline, List, Mark,
+    MathNode, NodeId, NodePayload, Record, Scalar, Table, Term,
 };
 
 /// `render --hide <class>`(D23)の結果。`text` は本文、`warnings` は非表示ノードへの
@@ -235,6 +235,7 @@ impl<'a> TypstRenderer<'a> {
             }
             NodePayload::List(l) => self.render_list(l, node_id, depth),
             NodePayload::Table(t) => self.render_table(t, node_id),
+            NodePayload::Record(r) => self.render_record(r, node_id),
             NodePayload::Math(m) => {
                 let math_str = self.render_math(&m.tree);
                 Ok(format!("$ {} $ <{}>\n\n", math_str, label(node_id)))
@@ -545,21 +546,8 @@ impl<'a> TypstRenderer<'a> {
             let row_path = &row_leaves[r];
             for col_path in &col_leaves {
                 let val_typst = match cell_map.get(&(row_path, col_path)) {
-                    Some(CellValue::Number { v }) => v.to_string(),
-                    Some(CellValue::Text { v }) => self.render_inlines(&[Inline::Text { s: v.clone() }])?,
-                    Some(CellValue::Ref { to }) => {
-                        let inner = match self.graph.nodes.get(to).map(|n| &n.payload) {
-                            Some(NodePayload::Value(val)) => match &val.scalar {
-                                Scalar::Number(n) => n.to_string(),
-                                Scalar::Text(s) => typst_escape(s),
-                                Scalar::Bool(b) => b.to_string(),
-                            },
-                            _ => "値".to_string(),
-                        };
-                        format!("#link(<{}>)[{}]", label(*to), inner)
-                    }
-                    Some(CellValue::Quantity { v, unit }) => format!("{} {}", v, typst_escape(unit)),
-                    Some(CellValue::Empty) | None => "".to_string(),
+                    Some(v) => self.render_cell_value(v)?,
+                    None => String::new(),
                 };
 
                 out.push_str(&format!("    [{}],\n", val_typst));
@@ -573,6 +561,44 @@ impl<'a> TypstRenderer<'a> {
         };
 
         Ok(format!("#figure(\n  {}{}\n) <{}>\n\n", out, caption_part, label(node_id)))
+    }
+
+    /// D28/D29: `CellValue` の描画。`::table` のセルと `::record` のエントリ値で共有する
+    /// (sml-spec §1.5「表セルと record 値で共通」の描画側の対応)。
+    fn render_cell_value(&mut self, v: &CellValue) -> Result<String, String> {
+        Ok(match v {
+            CellValue::Number { v } => v.to_string(),
+            CellValue::Text { v } => self.render_inlines(&[Inline::Text { s: v.clone() }])?,
+            CellValue::Ref { to } => {
+                let inner = match self.graph.nodes.get(to).map(|n| &n.payload) {
+                    Some(NodePayload::Value(val)) => match &val.scalar {
+                        Scalar::Number(n) => n.to_string(),
+                        Scalar::Text(s) => typst_escape(s),
+                        Scalar::Bool(b) => b.to_string(),
+                    },
+                    _ => "値".to_string(),
+                };
+                format!("#link(<{}>)[{}]", label(*to), inner)
+            }
+            CellValue::Quantity { v, unit } => format!("{} {}", v, typst_escape(unit)),
+            CellValue::Empty => String::new(),
+            // D29: 「日本語化はビューの仕事なのでやらない」— 素直な ISO ライクな表示で可。
+            CellValue::Date(d) => typst_escape(&format_date(d)),
+            CellValue::Period { from, to } => typst_escape(&format_period(from, to.as_ref())),
+        })
+    }
+
+    /// D28: Record の標準描画(2列表相当、ラベル `<ULID>` 付与は他ブロックと整合)。
+    fn render_record(&mut self, r: &Record, node_id: NodeId) -> Result<String, String> {
+        let mut out = String::new();
+        out.push_str("table(\n    columns: (auto, 1fr),\n    stroke: 0.5pt + luma(150),\n");
+        for entry in &r.entries {
+            let key_typst = typst_escape(&entry.key);
+            let val_typst = self.render_cell_value(&entry.value)?;
+            out.push_str(&format!("    [*{}*], [{}],\n", key_typst, val_typst));
+        }
+        out.push_str("  )");
+        Ok(format!("#figure(\n  {}\n) <{}>\n\n", out, label(node_id)))
     }
 
     /// D22 4.: Chart / Image は `#figure` に包む。Chart の中身は SVG 実描画をしない
@@ -657,6 +683,23 @@ fn format_coord(coord: &CellCoord) -> String {
     let row = coord.row_path.join(".");
     let col = coord.col_path.join(".");
     format!(" ({}, {})", typst_escape(&row), typst_escape(&col))
+}
+
+/// D29: 日付の素直な表示(`1997-03` / `1997-03-15`)。日本語化はビューの仕事なので
+/// ここではやらない(sml-spec §1.5 D29)。
+fn format_date(d: &DateValue) -> String {
+    match d.d {
+        Some(day) => format!("{:04}-{:02}-{:02}", d.y, d.m, day),
+        None => format!("{:04}-{:02}", d.y, d.m),
+    }
+}
+
+/// D29: 期間の素直な表示(`2020-10 〜 現在` / `1997-03 〜 2020-10`)。
+fn format_period(from: &DateValue, to: Option<&DateValue>) -> String {
+    match to {
+        Some(t) => format!("{} 〜 {}", format_date(from), format_date(t)),
+        None => format!("{} 〜 現在", format_date(from)),
+    }
 }
 
 fn mark_to_str(m: Mark) -> &'static str {

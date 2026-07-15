@@ -117,16 +117,16 @@ fn indented_list_marker_ordered(text: &str) -> Option<bool> {
     list_marker_ordered(text.trim_start_matches(' '))
 }
 
-/// `::table` / `::math` / `::figure` のいずれかで開くフェンスマーカーか。
-/// grammar (sml-spec 付録A) が `kind` を3語に閉じているため、それ以外の
-/// `::foo` は非対応構文としてフォールバック(段落扱い)にする。
+/// `::table` / `::math` / `::figure` / `::record`(D28)のいずれかで開くフェンス
+/// マーカーか。grammar (sml-spec 付録A) が `kind` をこの4語に閉じているため、
+/// それ以外の `::foo` は非対応構文としてフォールバック(段落扱い)にする。
 fn is_fence_open(text: &str) -> bool {
     if text.trim() == "::" {
         // これは閉じ行であって開始行ではない。
         return false;
     }
     match fence_kind_word(text) {
-        Some(w) => matches!(w.as_str(), "table" | "math" | "figure"),
+        Some(w) => matches!(w.as_str(), "table" | "math" | "figure" | "record"),
         None => false,
     }
 }

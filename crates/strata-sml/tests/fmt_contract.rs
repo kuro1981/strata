@@ -55,6 +55,9 @@ fn samples() -> Vec<&'static str> {
         "段落一行目\n二行目が続く。\n\n### 見出し 日本語 — テスト\n\n::figure\n[kind=chart, data-ref=tbl]\n[caption=\"図\"]\n::\n",
         // 既に ULID 済みの部分と未付与の部分が混在
         "# T {#01ARZ3NDEKTSV4RRFFQ69G5FAV}\n\n[id=01ARZ3NDEKTSV4RRFFQ69G5FAX]\nDone.\n\n- untagged item\n",
+        // D28/D29: recordフェンス(日本語キー・Date・Period・date-format 宣言)。
+        // fmt はフェンスマーカー行への ID 注入のみで本体(キー: 値の列)は不変のはず。
+        "::record {#basic-info}\n姓: 山田\n名: 太郎\n生年月日: 1997-03-15\n::\n\n::record\n[date-format=\"YYYY年M月\"]\n在籍期間: 2020年10月 〜 現在\n::\n",
     ]
 }
 

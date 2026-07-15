@@ -134,7 +134,7 @@ fn golden_formatted_table_matches_expected_structure() {
 
 fn parse_body(src: &str) -> (TableBody, Vec<strata_sml::Diag>) {
     let mut diags = Vec::new();
-    let table = strata_sml::table::parse_table_body(src, strata_sml::Span::new(0, src.len()), &mut diags);
+    let table = strata_sml::table::parse_table_body(src, strata_sml::Span::new(0, src.len()), None, &mut diags);
     (table, diags)
 }
 

@@ -63,13 +63,30 @@ pub enum DiagKind {
     /// いずれでもない(D17)。エッジが張られないタイポの検出用。挙動は従来どおり
     /// 無視のまま(`apply_block_attrs` は未知キーを黙って読み飛ばす)、`Warning`。
     UnknownAttrKey,
+    /// `::record` 本体の行に `:` が無い(D28、sml-spec §1.5)。「キー: 値」の構文に
+    /// 従っていない行はキーを特定できないため、その行はスキップして処理を続ける。
+    RecordMissingColon,
+    /// `::record` 本体の行のキーが空(`: 値` のように `:` の前が空白のみ、D28)。
+    RecordEmptyKey,
+    /// `::record` 本体で同一キーが複数回宣言されている(D28)。値は失わず全件を
+    /// 順序保存列にそのまま残す(データを捨てない)ため `Warning`。
+    DuplicateRecordKey,
+    /// セル値 / record 値が ISO 日付らしき形(`YYYY-MM[-DD]`)、または宣言済み
+    /// `date-format=` の形をしているが値レンジが不正(13月等)、あるいは期間の
+    /// 片側だけが日付として読めない(D29)。値は Text へフォールバックする。
+    BadDateValue,
+    /// フェンス属性 `date-format=` の値が未対応(v0 は `"YYYY年M月"` /
+    /// `"YYYY年M月D日"` のみ)、またはリスト値など裸トークンでない形(D29)。
+    BadDateFormat,
 }
 
 impl DiagKind {
     /// D17: 種別ごとの既定 severity。`Error` が既定で、`Warning` は明示した2種別のみ。
     pub fn severity(self) -> Severity {
         match self {
-            DiagKind::DuplicateFrontmatterKey | DiagKind::UnknownAttrKey => Severity::Warning,
+            DiagKind::DuplicateFrontmatterKey | DiagKind::UnknownAttrKey | DiagKind::DuplicateRecordKey => {
+                Severity::Warning
+            }
             _ => Severity::Error,
         }
     }
