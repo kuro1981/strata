@@ -1,0 +1,9 @@
+[package]
+name = "strata-context"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strata-core = { path = "../strata-core" }
+strata-build = { path = "../strata-build" }
+ulid = { version = "1", features = ["serde"] }

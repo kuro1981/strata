@@ -444,9 +444,19 @@ dependencies = [
  "clap",
  "serde_json",
  "strata-build",
+ "strata-context",
  "strata-sml",
  "strata-typst",
  "strata-view",
+]
+
+[[package]]
+name = "strata-context"
+version = "0.1.0"
+dependencies = [
+ "strata-build",
+ "strata-core",
+ "ulid",
 ]
 
 [[package]]

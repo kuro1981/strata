@@ -8,5 +8,6 @@ strata-sml = { path = "../strata-sml" }
 strata-build = { path = "../strata-build" }
 strata-typst = { path = "../strata-typst" }
 strata-view = { path = "../strata-view" }
+strata-context = { path = "../strata-context" }
 clap = { version = "4", features = ["derive"] }
 serde_json = "1"

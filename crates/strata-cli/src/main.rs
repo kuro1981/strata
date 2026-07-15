@@ -25,6 +25,10 @@ enum Command {
     /// Apply a declarative view definition to an SML file's canonical graph,
     /// producing template-consumable data files (YAML). See docs/view-def-v1.md.
     View(ViewArgs),
+    /// Serialize an SML file's canonical graph into an AI-readable context view
+    /// (ULID-addressable Markdown + semantic edge listing, D36). See
+    /// docs/context-m5a-handoff.md.
+    Context(ContextArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -90,6 +94,30 @@ struct ViewArgs {
     check: bool,
 }
 
+#[derive(ClapArgs, Debug)]
+struct ContextArgs {
+    /// SML file to build and serialize into a context view
+    file: PathBuf,
+
+    /// Write the context Markdown to this file instead of stdout
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Restrict the chunk to this node's `contains` subtree (alias or ULID). May be
+    /// repeated. Combined with `--class`, only class-matching blocks within the
+    /// requested subtree(s) are listed (AND, D36 scope 2+3 の併用は裁量).
+    #[arg(long = "node")]
+    node: Vec<String>,
+
+    /// Semantic-edge hop count for the `--node` neighbor summary (D36 既定 1).
+    #[arg(long, default_value_t = 1)]
+    hops: u32,
+
+    /// Cross-document class listing (D23 class tag, e.g. `note`).
+    #[arg(long)]
+    class: Option<String>,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -97,7 +125,60 @@ fn main() {
         Command::Build(build_args) => run_build(build_args),
         Command::Render(render_args) => run_render(render_args),
         Command::View(view_args) => run_view(view_args),
+        Command::Context(context_args) => run_context(context_args),
     }
+}
+
+/// `strata-cli context` サブコマンド(M5-A、D36、docs/context-m5a-handoff.md WP-A2)。
+///
+/// 内部で `strata_build::build` → `strata_context::render_context` を直結する。
+/// exit code は他コマンドと同じ 0/1/2 の慣習: 2 = SML を読めない・パースできない、
+/// または `--node` の alias/ULID が解決できない・`--class` 単独/無指定なのに
+/// フロントマターが無い(全文書スコープの前提が崩れる)、1 = 書き込み失敗、
+/// 0 = 成功。Warning は他コマンドと同じく stderr に出しつつ exit 0 を妨げない。
+fn run_context(args: ContextArgs) {
+    let src = match fs::read_to_string(&args.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let out = match strata_build::build(&src) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    print_warnings(&out.warnings, &src);
+
+    let opts = strata_context::ContextOptions { nodes: args.node, hops: args.hops, class: args.class };
+    let text = match strata_context::render_context(&out, &opts) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("-:-: ContextError: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    match args.output {
+        Some(path) => {
+            if let Err(e) = write_atomic(&path, &text) {
+                eprintln!("Failed to write output file: {}", e);
+                std::process::exit(1);
+            }
+        }
+        None => {
+            print!("{}", text);
+        }
+    }
+    std::process::exit(0);
 }
 
 /// `strata-cli view` サブコマンド(D30/D33、docs/view-v1-handoff.md WP-W2)。
