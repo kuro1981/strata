@@ -246,21 +246,45 @@ fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode:
         NodePayload::Document(_) => {
             // 通常 Document はルートとしてのみ現れ、render_document_scope が別経路で処理する。
         }
+        // M6(D40): blockquote — Markdown の `>` 記法を模した見出し行 + 子ブロック展開。
+        NodePayload::Quote(_) => {
+            out.push_str(&format!("引用 {tag}\n\n"));
+            if mode == RenderMode::Full {
+                for child in graph.children_of(id) {
+                    render_block(graph, child, depth, out, mode);
+                }
+            }
+        }
+        // M6(D40): 水平線。
+        NodePayload::ThematicBreak(_) => {
+            out.push_str(&format!("--- {tag}\n\n"));
+        }
     }
 }
 
 fn render_list_items(graph: &Graph, list_id: NodeId, indent: usize, out: &mut String, mode: RenderMode) {
-    let ordered = matches!(graph.nodes.get(&list_id).map(|n| &n.payload), Some(NodePayload::List(l)) if l.ordered);
+    let (ordered, start) = match graph.nodes.get(&list_id).map(|n| &n.payload) {
+        Some(NodePayload::List(l)) => (l.ordered, l.start),
+        _ => (false, None),
+    };
     let pad = "  ".repeat(indent);
+    // M6(D40、監査②5): 順序リストの開始値を反映した番号を振る。
+    let base = start.unwrap_or(1);
 
     for (i, child_id) in graph.children_of(list_id).into_iter().enumerate() {
         let Some(child_node) = graph.nodes.get(&child_id) else { continue };
         let tag = address_tag(child_id, child_node);
-        let marker = if ordered { format!("{}.", i + 1) } else { "-".to_string() };
+        let marker = if ordered { format!("{}.", base + i as u64) } else { "-".to_string() };
 
         match &child_node.payload {
             NodePayload::Para(p) => {
-                out.push_str(&format!("{pad}{marker} {} {tag}\n", render_inlines_md(graph, &p.inline)));
+                // M6(D40 Tier2): タスクリストのチェック状態(GFM 記法)。
+                let check = match p.checked {
+                    Some(true) => "[x] ",
+                    Some(false) => "[ ] ",
+                    None => "",
+                };
+                out.push_str(&format!("{pad}{marker} {check}{} {tag}\n", render_inlines_md(graph, &p.inline)));
                 if mode == RenderMode::Full {
                     for sub_id in graph.children_of(child_id) {
                         if let Some(NodePayload::List(_)) = graph.nodes.get(&sub_id).map(|n| &n.payload) {

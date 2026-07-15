@@ -51,6 +51,9 @@ pub(crate) fn node_short_label(graph: &Graph, id: NodeId) -> String {
                 None => "record(空)".to_string(),
             }
         }
+        // M6(D40)。
+        NodePayload::Quote(_) => "引用".to_string(),
+        NodePayload::ThematicBreak(_) => "水平線".to_string(),
     }
 }
 

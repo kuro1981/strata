@@ -19,7 +19,8 @@ fn read_doc(rel: &str) -> String {
 fn parse(src: &str) -> (Vec<SmlInline>, Vec<Diag>) {
     let mut diags = Vec::new();
     let span = Span::new(0, src.len());
-    let out = parse_inlines(src, span, &mut diags);
+    let refdefs = std::collections::HashMap::new();
+    let out = parse_inlines(src, span, &mut diags, &refdefs);
     (out, diags)
 }
 
@@ -38,6 +39,8 @@ fn collect_inlines(blocks: &[SmlBlock]) -> Vec<SmlInline> {
                 }
             }
             BlockKind::Fence(_) | BlockKind::CodeFence { .. } => {}
+            BlockKind::Quote { blocks } => out.extend(collect_inlines(blocks)),
+            BlockKind::LinkRefDef { .. } | BlockKind::ThematicBreak | BlockKind::GfmTable(_) => {}
         }
     }
     out
@@ -65,6 +68,16 @@ fn assert_spans_within(nodes: &[SmlInline], span: Span) {
             }
             SmlInline::Emph { children, .. } => assert_spans_within(children, span),
             SmlInline::Ref { .. } | SmlInline::TermRef { .. } => {}
+            SmlInline::Escaped(sp) => {
+                assert!(
+                    sp.start >= span.start && sp.end <= span.end,
+                    "span {sp:?} escapes bounds {span:?}"
+                );
+            }
+            SmlInline::Link { url, text } | SmlInline::Image { url, alt: text } => {
+                assert!(url.start >= span.start && url.end <= span.end, "url span escapes bounds");
+                assert!(text.start >= span.start && text.end <= span.end, "text span escapes bounds");
+            }
         }
     }
 }
@@ -320,14 +333,14 @@ fn bracket_with_empty_parens_falls_back_to_text() {
     assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
 }
 
+/// M6(D40、監査②2の解消): 外部リンクは `Inline::Link` として解決される
+/// (旧: 診断なしでプレーンテキストへ丸ごとフォールバック — v0 の既知の違反だった)。
 #[test]
-fn external_link_falls_back_without_diag() {
-    let src = "本文中の [外部サイト](https://example.com/foo) はv0仕様に存在しない。";
+fn external_link_becomes_link_node_without_diag() {
+    let src = "本文中の [外部サイト](https://example.com/foo) はもう不活性化しない。";
     let (out, diags) = parse(src);
     assert!(diags.is_empty(), "external links must not raise diags: {diags:?}");
-    // 曖昧点: リンク自体は解決されずプレーンテキストへ丸ごとフォールバックする。
-    assert_eq!(out.len(), 1);
-    assert!(matches!(&out[0], SmlInline::Text(_)));
+    assert!(out.iter().any(|n| matches!(n, SmlInline::Link { url, text } if url.slice(src) == "https://example.com/foo" && text.slice(src) == "外部サイト")));
 }
 
 // ---- UnknownScheme --------------------------------------------------------------
@@ -417,6 +430,7 @@ fn spans_stay_within_input_span_for_a_substring_of_a_larger_document() {
     let end = src.len();
     let span = Span::new(start, end);
     let mut diags = Vec::new();
-    let out = parse_inlines(src, span, &mut diags);
+    let refdefs = std::collections::HashMap::new();
+    let out = parse_inlines(src, span, &mut diags, &refdefs);
     assert_spans_within(&out, span);
 }

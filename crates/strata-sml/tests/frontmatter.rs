@@ -100,13 +100,16 @@ fn unclosed_frontmatter_is_diagnosed() {
 
 #[test]
 fn mid_file_triple_dash_is_a_paragraph_not_frontmatter() {
+    // M6(D40): 文中の孤立した `---` はもはや段落フォールバックではなく
+    // `ThematicBreak`(水平線)になる(監査④の解消)。フロントマターとの無衝突
+    // (オフセット0限定判定)自体は変わらない。
     let src = "# Title\n\n---\n\nMore text.\n";
     let out = parse(src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert!(out.doc.frontmatter.is_none());
     assert_eq!(out.doc.blocks.len(), 3);
     assert!(matches!(out.doc.blocks[0].kind, BlockKind::Heading { .. }));
-    assert!(matches!(out.doc.blocks[1].kind, BlockKind::Paragraph { .. }));
+    assert!(matches!(out.doc.blocks[1].kind, BlockKind::ThematicBreak));
     assert!(matches!(out.doc.blocks[2].kind, BlockKind::Paragraph { .. }));
 }
 

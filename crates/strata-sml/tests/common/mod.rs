@@ -60,6 +60,10 @@ pub enum NInline {
     MathTex(String),
     Ref { scheme: RefScheme, target: RefTarget, coord: Option<strata_sml::CellCoord>, text: String },
     TermRef { name_or_id: RefTarget, text: String },
+    /// M6(D40)。
+    Escaped(String),
+    Link { url: String, text: String },
+    Image { url: String, alt: String },
 }
 
 pub fn norm_inline(src: &str, node: &SmlInline) -> NInline {
@@ -73,6 +77,9 @@ pub fn norm_inline(src: &str, node: &SmlInline) -> NInline {
         SmlInline::TermRef { name_or_id, text } => {
             NInline::TermRef { name_or_id: name_or_id.clone(), text: text.slice(src).to_string() }
         }
+        SmlInline::Escaped(sp) => NInline::Escaped(sp.slice(src).to_string()),
+        SmlInline::Link { url, text } => NInline::Link { url: url.slice(src).to_string(), text: text.slice(src).to_string() },
+        SmlInline::Image { url, alt } => NInline::Image { url: url.slice(src).to_string(), alt: alt.slice(src).to_string() },
     }
 }
 
@@ -162,10 +169,15 @@ pub fn norm_fence_body(src: &str, body: &FenceBody) -> NFenceBody {
 pub enum NBlockKind {
     Heading { level: u8, inline: Vec<NInline> },
     Paragraph { inline: Vec<NInline> },
-    /// 各要素は1項目のインライン列(id_tag は無視)。
-    List { ordered: bool, items: Vec<Vec<NInline>> },
+    /// 各要素は `(インライン列, タスクリストのチェック状態)`(id_tag は無視)。
+    List { ordered: bool, start: Option<u64>, items: Vec<(Vec<NInline>, Option<bool>)> },
     Fence { fence_kind: FenceKind, fence_attrs: Vec<Vec<NAttrEntry>>, body: NFenceBody },
     CodeFence { lang: String, body: String },
+    /// M6(D40)。
+    LinkRefDef { label: String, url: String, title: Option<String> },
+    Quote { blocks: Vec<NBlock> },
+    ThematicBreak,
+    GfmTable { header: Vec<String>, rows: Vec<Vec<CellRaw>> },
 }
 
 #[derive(Debug, PartialEq)]
@@ -180,9 +192,10 @@ pub fn norm_block(src: &str, b: &SmlBlock) -> NBlock {
             NBlockKind::Heading { level: *level, inline: norm_inlines(src, inline) }
         }
         BlockKind::Paragraph { inline } => NBlockKind::Paragraph { inline: norm_inlines(src, inline) },
-        BlockKind::List { ordered, items } => NBlockKind::List {
+        BlockKind::List { ordered, items, start } => NBlockKind::List {
             ordered: *ordered,
-            items: items.iter().map(|it| norm_inlines(src, &it.inline)).collect(),
+            start: *start,
+            items: items.iter().map(|it| (norm_inlines(src, &it.inline), it.checked)).collect(),
         },
         BlockKind::Fence(fb) => NBlockKind::Fence {
             fence_kind: fb.fence_kind,
@@ -193,6 +206,17 @@ pub fn norm_block(src: &str, b: &SmlBlock) -> NBlock {
         BlockKind::CodeFence { lang, body, id_tag: _ } => {
             NBlockKind::CodeFence { lang: lang.clone(), body: body.slice(src).to_string() }
         }
+        BlockKind::LinkRefDef { label, url, title } => NBlockKind::LinkRefDef {
+            label: label.clone(),
+            url: url.slice(src).to_string(),
+            title: title.map(|t| t.slice(src).to_string()),
+        },
+        BlockKind::Quote { blocks } => NBlockKind::Quote { blocks: blocks.iter().map(|b| norm_block(src, b)).collect() },
+        BlockKind::ThematicBreak => NBlockKind::ThematicBreak,
+        BlockKind::GfmTable(tb) => NBlockKind::GfmTable {
+            header: tb.header.iter().map(|s| s.slice(src).to_string()).collect(),
+            rows: tb.rows.clone(),
+        },
     };
     NBlock { attrs: norm_attrs(&b.attrs), kind }
 }

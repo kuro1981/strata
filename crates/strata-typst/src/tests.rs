@@ -17,7 +17,7 @@ use strata_core::{
 use std::collections::BTreeMap;
 
 fn para(id: NodeId, inline: Vec<Inline>) -> Node {
-    Node::new(id, NodePayload::Para(Para { inline }))
+    Node::new(id, NodePayload::Para(Para { inline, checked: None }))
 }
 
 // --- Document title フォールバック3段(D21) -----------------------------------
@@ -90,7 +90,7 @@ fn ref_with_text_and_unnumbered_target_uses_link() {
     let list_id = NodeId::new();
     let para_id = NodeId::new();
     let mut g = Graph::default();
-    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false })));
+    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false, start: None })));
     g.insert(para(
         para_id,
         vec![Inline::Ref { to: list_id, rel: Rel::RefersTo, coord: None, text: "上のリスト".into() }],
@@ -378,9 +378,9 @@ fn nested_list_renders_with_indented_items() {
     let sub_list_id = NodeId::new();
     let sub_id = NodeId::new();
     let mut g = Graph::default();
-    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false })));
+    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false, start: None })));
     g.insert(para(top_id, vec![Inline::Text { s: "親項目".into() }]));
-    g.insert(Node::new(sub_list_id, NodePayload::List(List { ordered: false })));
+    g.insert(Node::new(sub_list_id, NodePayload::List(List { ordered: false, start: None })));
     g.insert(para(sub_id, vec![Inline::Text { s: "子項目".into() }]));
     g.link(list_id, Rel::Contains, top_id, Some(0));
     g.link(top_id, Rel::Contains, sub_list_id, Some(0));
@@ -403,9 +403,9 @@ fn ordered_nested_list_uses_plus_marker() {
     let sub_list_id = NodeId::new();
     let sub_id = NodeId::new();
     let mut g = Graph::default();
-    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false })));
+    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false, start: None })));
     g.insert(para(top_id, vec![Inline::Text { s: "親".into() }]));
-    g.insert(Node::new(sub_list_id, NodePayload::List(List { ordered: true })));
+    g.insert(Node::new(sub_list_id, NodePayload::List(List { ordered: true, start: None })));
     g.insert(para(sub_id, vec![Inline::Text { s: "番号付き子".into() }]));
     g.link(list_id, Rel::Contains, top_id, Some(0));
     g.link(top_id, Rel::Contains, sub_list_id, Some(0));

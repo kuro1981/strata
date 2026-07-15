@@ -15,20 +15,130 @@
 use ulid::Ulid;
 
 use crate::ast::{
-    AttrLine, AttrValue, BlockKind, FenceBlock, FenceBody, FenceKind, IdTag, ListBlock, ListItem, RefTarget,
-    SmlBlock,
+    AttrLine, AttrValue, BlockKind, FenceBlock, FenceBody, FenceKind, IdTag, ListBlock, ListItem, RefDefs,
+    RefTarget, SmlBlock, SmlInline,
 };
 use crate::error::{Diag, DiagKind};
-use crate::scan::{fence_kind_word, looks_like_attr_line, split_lines_range, RawBlock, RawKind};
+use crate::scan::{fence_kind_word, looks_like_attr_line, looks_like_html_line, split_lines_range, RawBlock, RawKind};
 use crate::span::Span;
 use crate::value::DateFormat;
 
-/// 層Aの `RawBlock` 列を最終的な `SmlBlock` 列に変換する。
+/// 層Aの `RawBlock` 列を最終的な `SmlBlock` 列に変換する。参照スタイルリンクの
+/// 定義行(M6 D40)を先に収集し、インライン解決に使う。
 pub(crate) fn build_blocks(src: &str, raw_blocks: Vec<RawBlock>, diags: &mut Vec<Diag>) -> Vec<SmlBlock> {
-    raw_blocks.into_iter().map(|rb| build_block(src, rb, diags)).collect()
+    let refdefs = collect_link_ref_defs(src, &raw_blocks);
+    build_blocks_with(src, raw_blocks, diags, &refdefs)
 }
 
-fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
+fn build_blocks_with(src: &str, raw_blocks: Vec<RawBlock>, diags: &mut Vec<Diag>, refdefs: &RefDefs) -> Vec<SmlBlock> {
+    raw_blocks.into_iter().map(|rb| build_block(src, rb, diags, refdefs)).collect()
+}
+
+/// M6(D40、監査②4): 参照スタイルリンクの定義行(`[label]: url "title"`)を集める。
+/// 最上位のブロック列だけを見る(blockquote 内の定義行は対象外 — 裁量、最終報告参照。
+/// 実運用上の定義行はほぼ常に文書トップレベルに置かれる)。
+fn collect_link_ref_defs(src: &str, raw_blocks: &[RawBlock]) -> RefDefs {
+    let mut map = RefDefs::new();
+    for rb in raw_blocks {
+        if let RawKind::LinkRefDef { line_span } = &rb.kind
+            && let Some((label, url_span, _title)) = parse_link_ref_def_line(src, *line_span)
+        {
+            map.entry(label).or_insert(url_span);
+        }
+    }
+    map
+}
+
+/// `[label]: url ["title"]` 行を `(正規化ラベル, url span, title span)` へ分解する。
+/// scan.rs の `looks_like_link_ref_def` が既に大まかな形を検証済みなので、ここでは
+/// 失敗しても `None` を返すだけ(呼び出し側は寛容にスキップする)。
+fn parse_link_ref_def_line(src: &str, line_span: Span) -> Option<(String, Span, Option<Span>)> {
+    let bytes = src.as_bytes();
+    let mut i = line_span.start;
+    while i < line_span.end && bytes[i] == b' ' {
+        i += 1;
+    }
+    if i >= line_span.end || bytes[i] != b'[' {
+        return None;
+    }
+    let label_start = i + 1;
+    let mut j = label_start;
+    while j < line_span.end && bytes[j] != b']' {
+        j += 1;
+    }
+    if j >= line_span.end || j == label_start {
+        return None;
+    }
+    let label = src[label_start..j].to_string();
+    let mut k = j + 1;
+    if k >= line_span.end || bytes[k] != b':' {
+        return None;
+    }
+    k += 1;
+    while k < line_span.end && bytes[k] == b' ' {
+        k += 1;
+    }
+    let url_start = k;
+    let mut url_end = url_start;
+    while url_end < line_span.end && bytes[url_end] != b' ' {
+        url_end += 1;
+    }
+    if url_start == url_end {
+        return None;
+    }
+    let url_span = Span::new(url_start, url_end);
+    let mut m = url_end;
+    while m < line_span.end && bytes[m] == b' ' {
+        m += 1;
+    }
+    let title_span = if m < line_span.end && bytes[m] == b'"' && line_span.end > m + 1 && bytes[line_span.end - 1] == b'"' {
+        Some(Span::new(m + 1, line_span.end - 1))
+    } else {
+        None
+    };
+    Some((crate::inline::normalize_label(&label), url_span, title_span))
+}
+
+/// 複数行段落のインラインパース。行スパンが連続(改行1バイトのみを挟む)していれば
+/// 従来どおり1つの結合スパンとして渡す(強調等が行を跨げる)。連続していない場合
+/// (M6 D40: blockquote 内の段落 — 行頭 `> ` マーカーがスパン間に挟まる)は行ごとに
+/// パースし、行間には改行1バイトの Text スパンを差し込んで繋ぐ(マーカーの `> ` を
+/// インライン本文へ混入させない。跨行の強調は引用内では非対応 — 裁量、最終報告参照)。
+fn parse_paragraph_inlines(src: &str, line_spans: &[Span], diags: &mut Vec<Diag>, refdefs: &RefDefs) -> Vec<SmlInline> {
+    let contiguous =
+        line_spans.windows(2).all(|w| w[1].start == w[0].end + 1);
+    if contiguous {
+        let span = Span::new(line_spans[0].start, line_spans[line_spans.len() - 1].end);
+        return crate::inline::parse_inlines(src, span, diags, refdefs);
+    }
+    let mut out = Vec::new();
+    for (i, span) in line_spans.iter().enumerate() {
+        if i > 0 {
+            // 直前行の直後にある改行1バイトを Text として繋ぐ(実在のソーススパン)。
+            let nl = line_spans[i - 1].end;
+            out.push(SmlInline::Text(Span::new(nl, nl + 1)));
+        }
+        out.extend(crate::inline::parse_inlines(src, *span, diags, refdefs));
+    }
+    out
+}
+
+/// パラグラフ本文の各行を HTML ブロック/インラインらしきパターンで検査し、Tier3
+/// (M6 D40)の `HtmlNotSupported` Warning を積む(意味グラフには落とさずリテラル扱い
+/// のまま継続する)。
+fn check_html_like_lines(src: &str, line_spans: &[Span], diags: &mut Vec<Diag>) {
+    for span in line_spans {
+        if looks_like_html_line(span.slice(src)) {
+            diags.push(Diag::new(
+                DiagKind::HtmlNotSupported,
+                *span,
+                "HTML ブロック/インラインらしき行です(SML は HTML を構造化しません。リテラル扱いのまま継続します)",
+            ));
+        }
+    }
+}
+
+fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>, refdefs: &RefDefs) -> SmlBlock {
     let attrs = rb.attr_line_span.map(|span| parse_attr_line(src, span, diags));
 
     let kind = match rb.kind {
@@ -37,22 +147,47 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
             // 行頭マーカー(`#`×level + 空白)は level に既に反映済みなので、
             // インライン本文には含めない。
             let text_span = strip_heading_marker(src, text_span, level);
-            let inline = crate::inline::parse_inlines(src, text_span, diags);
+            // M6(D40): 見出し閉じ装飾(`# H #####`)の末尾 `#` 列を除去する。
+            let text_span = strip_atx_closing_hashes(src, text_span);
+            let inline = crate::inline::parse_inlines(src, text_span, diags, refdefs);
+            BlockKind::Heading { level, inline, id_tag }
+        }
+        RawKind::SetextHeading { level, line_spans } => {
+            // M6(D40、監査②9): 段落直後の Setext 下線(`===`/`---`)を見出しへ昇格する。
+            let last = *line_spans.last().expect("Setext 見出しは最低1行のテキストを持つ");
+            let (last_text_span, id_tag) = extract_trailing_id_tag(src, last, diags);
+            let mut spans = line_spans.clone();
+            *spans.last_mut().expect("非空を確認済み") = last_text_span;
+            let inline = parse_paragraph_inlines(src, &spans, diags, refdefs);
             BlockKind::Heading { level, inline, id_tag }
         }
         RawKind::Paragraph { line_spans } => {
-            let span = Span::new(line_spans[0].start, line_spans[line_spans.len() - 1].end);
-            let inline = crate::inline::parse_inlines(src, span, diags);
+            check_html_like_lines(src, &line_spans, diags);
+            let inline = parse_paragraph_inlines(src, &line_spans, diags, refdefs);
             BlockKind::Paragraph { inline }
         }
-        RawKind::List { ordered, item_line_spans } => {
+        RawKind::ThematicBreak => BlockKind::ThematicBreak,
+        RawKind::LinkRefDef { line_span } => match parse_link_ref_def_line(src, line_span) {
+            Some((label, url, title)) => BlockKind::LinkRefDef { label, url, title },
+            None => BlockKind::LinkRefDef { label: String::new(), url: line_span, title: None },
+        },
+        RawKind::Quote { inner_lines } => {
+            let inner_raw = crate::scan::scan_lines(src, &inner_lines, diags);
+            let blocks = build_blocks_with(src, inner_raw, diags, refdefs);
+            BlockKind::Quote { blocks }
+        }
+        RawKind::GfmTable { header_span, row_spans } => {
+            let body = crate::gfm_table::parse_gfm_table_body(src, header_span, &row_spans, diags);
+            BlockKind::GfmTable(body)
+        }
+        RawKind::List { ordered, start, item_line_spans } => {
             // D24(2026-07-14 裁定): item_line_spans はインデント無し(ルート)・
             // インデント有り(ネスト候補)の両方を含む文書順のフラット列(scan.rs が
             // マーカー行として一括りにしている)。ここでインデント量(2スペース/レベル)
             // を解釈して木構造に組み立てる(sml-spec §6.1 の table.rs と同じ手法)。
             let mut idx = 0;
-            let items = parse_list_items(src, &item_line_spans, &mut idx, diags, 0);
-            BlockKind::List { ordered, items }
+            let items = parse_list_items(src, &item_line_spans, &mut idx, diags, 0, refdefs);
+            BlockKind::List { ordered, items, start }
         }
         RawKind::Fence { marker_line_span, body_span } => {
             // scan.rs の is_fence_open が既に kind ワードを検証済みなので、ここで
@@ -96,7 +231,8 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>) -> SmlBlock {
             // D10(2026-07-14 改定): コードフェンス開始行末尾の `{#id}` を見出しと
             // 同じ規則で抽出する(行型ブロック)。
             let (text_span, id_tag) = extract_trailing_id_tag(src, marker_line_span, diags);
-            let lang = text_span.slice(src).trim_start_matches('`').trim().to_string();
+            // M6(D40、監査②8): `~~~` フェンスも `` ``` `` と同等に扱う。
+            let lang = text_span.slice(src).trim_start_matches(['`', '~']).trim().to_string();
             BlockKind::CodeFence { lang, body: body_span, id_tag }
         }
     };
@@ -162,7 +298,15 @@ fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Ve
         BlockKind::CodeFence { id_tag, .. } => {
             if id_tag.is_some() { LineTypeState::HasOwnIdTag } else { LineTypeState::NoDirectIdTag }
         }
-        BlockKind::Paragraph { .. } | BlockKind::List { .. } => LineTypeState::NotLineType,
+        // M6(D40): blockquote・GFM 表はプローズ扱い(前置属性行で id を与える、
+        // List/Paragraph と同じ規則)。水平線・参照リンク定義行は id 概念を持たない
+        // ブロックなので同様に許容側(診断なし)に倒す(裁量、最終報告参照)。
+        BlockKind::Paragraph { .. }
+        | BlockKind::List { .. }
+        | BlockKind::Quote { .. }
+        | BlockKind::GfmTable(_)
+        | BlockKind::ThematicBreak
+        | BlockKind::LinkRefDef { .. } => LineTypeState::NotLineType,
     };
 
     if matches!(state, LineTypeState::NotLineType) {
@@ -197,7 +341,10 @@ fn check_id_placement(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Ve
 /// (見出し・フェンス・コードフェンス〈D10〉)は `check_id_placement` が `id=` の
 /// 存在自体を弾く(DuplicateId / IdNotAllowedHere)ため、ここでは値の検証を重ねない。
 fn check_id_value(attrs: &Option<AttrLine>, kind: &BlockKind, diags: &mut Vec<Diag>) {
-    if !matches!(kind, BlockKind::Paragraph { .. } | BlockKind::List { .. }) {
+    if !matches!(
+        kind,
+        BlockKind::Paragraph { .. } | BlockKind::List { .. } | BlockKind::Quote { .. } | BlockKind::GfmTable(_)
+    ) {
         return;
     }
     let Some(attr_line) = attrs else { return };
@@ -242,22 +389,39 @@ fn strip_heading_marker(src: &str, span: Span, level: u8) -> Span {
     Span::new(span.start + off, span.end)
 }
 
+/// M6(D40): ATX 見出しの閉じ装飾(`# H #####`)の末尾 `#` 列を除去する。CommonMark
+/// 準拠: 末尾の `#` 列の直前に空白が必須(無ければテキストの一部として残す)。
+fn strip_atx_closing_hashes(src: &str, span: Span) -> Span {
+    let text = span.slice(src);
+    let trimmed_end = text.trim_end();
+    let before_hashes = trimmed_end.trim_end_matches('#');
+    if before_hashes.len() == trimmed_end.len() || before_hashes.is_empty() {
+        return span;
+    }
+    if !before_hashes.ends_with(' ') && !before_hashes.ends_with('\t') {
+        return span;
+    }
+    let new_len = before_hashes.trim_end().len();
+    Span::new(span.start, span.start + new_len)
+}
+
 /// リスト項目行の text_span から項目マーカー(`- ` / `N. ` と後続空白)を取り除く。
 /// 予期しない形(マーカーが検出できない)なら安全側に倒して span をそのまま返す。
+/// M6(D40): 代替マーカー(`*`/`+` 箇条書き、`N)` 順序)にも対応する。
 fn strip_list_marker(src: &str, span: Span) -> Span {
     let bytes = span.slice(src).as_bytes();
     let mut off = 0;
     while off < bytes.len() && bytes[off] == b' ' {
         off += 1;
     }
-    if off < bytes.len() && bytes[off] == b'-' {
+    if off < bytes.len() && matches!(bytes[off], b'-' | b'*' | b'+') {
         off += 1;
     } else {
         let digits_start = off;
         while off < bytes.len() && bytes[off].is_ascii_digit() {
             off += 1;
         }
-        if off == digits_start || off >= bytes.len() || bytes[off] != b'.' {
+        if off == digits_start || off >= bytes.len() || !matches!(bytes[off], b'.' | b')') {
             return span; // マーカー無し(内部不整合)。全体を返す
         }
         off += 1;
@@ -292,12 +456,27 @@ fn list_level_of(indent: usize) -> (usize, bool) {
     (indent / 2, indent.is_multiple_of(2))
 }
 
-/// 行(インデント込み)の先頭マーカーが番号付き(`N. `)かどうか。この行が既に
-/// scan.rs でマーカー行と判定済みであることを前提とする(`- ` でなければ番号付きと
-/// みなす)。
+/// 行(インデント込み)の先頭マーカーが番号付き(`N.`/`N)`)かどうか。この行が既に
+/// scan.rs でマーカー行と判定済みであることを前提とする。M6(D40): 代替マーカー
+/// (`*`/`+`)も箇条書きとして正しく判定するため `scan::list_marker_ordered` に委譲する
+/// (旧実装は「`-` でなければ番号付き」という誤判定をしていた — alt bullet 追加に伴う
+/// 修正)。
 fn line_marker_is_ordered(src: &str, span: Span) -> bool {
     let stripped = span.slice(src).trim_start_matches(' ');
-    !(stripped.starts_with("- ") || stripped.starts_with("-\t"))
+    crate::scan::list_marker_ordered(stripped).unwrap_or(false)
+}
+
+/// M6(D40 Tier2): タスクリストのチェック状態(`- [ ] text` / `- [x] text`)。項目
+/// マーカーを除いた `text_span` の先頭が `[ ] `/`[x] `(大文字 X も許容)なら、それを
+/// 取り除いたスパンと `Some(checked)` を返す。該当しなければ元の span と `None`。
+fn strip_task_marker(src: &str, span: Span) -> (Span, Option<bool>) {
+    let text = span.slice(src);
+    for (prefix, checked) in [("[ ] ", false), ("[ ]\t", false), ("[x] ", true), ("[x]\t", true), ("[X] ", true), ("[X]\t", true)] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            return (Span::new(span.end - rest.len(), span.end), Some(checked));
+        }
+    }
+    (span, None)
 }
 
 /// `lines[*idx]` から、インデントレベルが `level` のリスト項目を連続して読み取る
@@ -309,6 +488,7 @@ fn parse_list_items(
     idx: &mut usize,
     diags: &mut Vec<Diag>,
     level: usize,
+    refdefs: &RefDefs,
 ) -> Vec<ListItem> {
     let mut items = Vec::new();
     while *idx < lines.len() {
@@ -344,7 +524,9 @@ fn parse_list_items(
         let (text_span, id_tag) = extract_trailing_id_tag(src, line_span, diags);
         // 項目マーカー(`- ` / `N. `、インデント込み)はインライン本文に含めない。
         let text_span = strip_list_marker(src, text_span);
-        let inline = crate::inline::parse_inlines(src, text_span, diags);
+        // M6(D40 Tier2、監査④): タスクリストのチェック状態を項目マーカーの直後から読む。
+        let (text_span, checked) = strip_task_marker(src, text_span);
+        let inline = crate::inline::parse_inlines(src, text_span, diags, refdefs);
 
         let mut child = None;
         if *idx < lines.len() {
@@ -352,14 +534,26 @@ fn parse_list_items(
             let (next_level, next_aligned) = list_level_of(next_indent);
             if next_aligned && next_level == level + 1 {
                 let ordered = line_marker_is_ordered(src, lines[*idx]);
-                let nested = parse_list_items(src, lines, idx, diags, level + 1);
-                child = Some(Box::new(ListBlock { ordered, items: nested }));
+                let start = if ordered {
+                    list_marker_start_value_of(src, lines[*idx])
+                } else {
+                    None
+                };
+                let nested = parse_list_items(src, lines, idx, diags, level + 1, refdefs);
+                child = Some(Box::new(ListBlock { ordered, items: nested, start }));
             }
         }
 
-        items.push(ListItem { span: line_span, inline, id_tag, child });
+        items.push(ListItem { span: line_span, inline, id_tag, child, checked });
     }
     items
+}
+
+/// M6(D40): ネストしたリストの先頭項目行から順序リストの開始値を読む(トップレベル
+/// リストの `RawKind::List.start` と同じ規則、`scan::list_marker_start_value` に委譲)。
+fn list_marker_start_value_of(src: &str, span: Span) -> Option<u64> {
+    let stripped = span.slice(src).trim_start_matches(' ');
+    crate::scan::list_marker_start_value(stripped)
 }
 
 pub(crate) fn parse_ref_target(token: &str) -> RefTarget {

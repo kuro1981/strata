@@ -97,7 +97,21 @@ pub enum NodePayload {
     /// key-value ブロック(D28、sml-spec §1.5・§6)。`::record` フェンスの canonical
     /// 表現。キーは自由テキスト(日本語可、表の座標キーとは別物でパス構文に入らない)。
     Record(Record),
+    /// blockquote(`>` 行群、M6 D40)。子ブロックは contains で持つ(v0 は1段。
+    /// ネスト引用は裁量、最終報告参照)。
+    Quote(Quote),
+    /// 水平線(単独行 `---`/`***`/`___`、M6 D40)。中身を持たない構造マーカー。
+    ThematicBreak(ThematicBreak),
 }
+
+/// blockquote 本体(M6 D40)。中身は空: 子ブロックは他のコンテナ(Section 等)と
+/// 同じく `Rel::Contains` で持つ。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quote {}
+
+/// 水平線(M6 D40)。中身を持たないマーカーノード。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThematicBreak {}
 
 /// `::record` フェンスの本体(D28)。キーと値の順序保存列(sml-spec §1.5)。
 /// 重複キーはパーサが `Warning` 診断を出すが、データは失わず全件保持する。
@@ -125,15 +139,23 @@ pub struct Section {
     // 子は contains エッジで持つ(payload には埋めない)。
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Para {
     pub inline: Vec<Inline>,
+    /// GFM タスクリストのチェック状態(M6 D40)。`- [ ]`/`- [x]` の項目のみ `Some`。
+    /// 通常の段落・リスト項目は `None`(後方互換フィールド)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct List {
     pub ordered: bool,
     // 各項目は contains された para / section。
+    /// 順序リストの開始値(M6 D40)。`5. fifth` のように1以外から始まる場合に保持する。
+    /// 既定(1始まり)または非順序リストでは `None`(後方互換フィールド)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -209,6 +231,18 @@ pub enum Inline {
     Anchor {
         to: NodeId,
     },
+    /// 外部リンク(`http(s)://…` / `mailto:…` / autolink、M6 D40)。SML のナビゲーション
+    /// 参照(`Inline::Ref`)とは別物 — Edge は張らない(意味エッジの対象外、ただの
+    /// 外部 URL)。
+    Link {
+        url: String,
+        text: String,
+    },
+    /// インライン画像(`![alt](url)`、M6 D40)。`Inline::Ref`/`Edge` は張らない。
+    Image {
+        url: String,
+        alt: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +251,8 @@ pub enum EmphKind {
     Strong,
     Em,
     Code,
+    /// `~~取消線~~`(M6 D40 Tier2)。
+    Strike,
 }
 
 // エッジ(§2, §4)
@@ -627,6 +663,7 @@ mod tests {
                     Inline::Term { to: term_id, text: String::new() },
                     Inline::Text { s: "で低次元へ写す。".into() },
                 ],
+                checked: None,
             }),
         ));
         // インラインの Term に対応する Edge を materialise。
@@ -838,14 +875,14 @@ mod tests {
             id: NodeId::new(),
             classes: vec!["note".to_string(), "actual-name".to_string()],
             alias: None,
-            payload: NodePayload::Para(Para { inline: vec![] }),
+            payload: NodePayload::Para(Para { inline: vec![], checked: None }),
         };
         let json = serde_json::to_string(&with_classes).unwrap();
         assert!(json.contains(r#""classes":["note","actual-name"]"#), "{json}");
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(with_classes, back);
 
-        let without_classes = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![] }));
+        let without_classes = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![], checked: None }));
         let json = serde_json::to_string(&without_classes).unwrap();
         assert!(!json.contains("classes"), "{json}");
     }
@@ -869,14 +906,14 @@ mod tests {
             id: NodeId::new(),
             classes: Vec::new(),
             alias: Some("eval-table".to_string()),
-            payload: NodePayload::Para(Para { inline: vec![] }),
+            payload: NodePayload::Para(Para { inline: vec![], checked: None }),
         };
         let json = serde_json::to_string(&with_alias).unwrap();
         assert!(json.contains(r#""alias":"eval-table""#), "{json}");
         let back: Node = serde_json::from_str(&json).unwrap();
         assert_eq!(with_alias, back);
 
-        let without_alias = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![] }));
+        let without_alias = Node::new(NodeId::new(), NodePayload::Para(Para { inline: vec![], checked: None }));
         let json = serde_json::to_string(&without_alias).unwrap();
         assert!(!json.contains("alias"), "{json}");
     }

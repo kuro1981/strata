@@ -204,6 +204,9 @@ impl<'a> TypstRenderer<'a> {
                 Inline::Emph { children, .. } => out.push_str(&self.plain_text(children)),
                 Inline::Ref { text, .. } => out.push_str(text),
                 Inline::Term { text, .. } => out.push_str(text),
+                // M6(D40): 外部リンクは表示テキスト、画像は alt をプレーンテキストとする。
+                Inline::Link { text, .. } => out.push_str(text),
+                Inline::Image { alt, .. } => out.push_str(alt),
                 Inline::Math { .. } | Inline::Anchor { .. } => {}
             }
         }
@@ -262,6 +265,21 @@ impl<'a> TypstRenderer<'a> {
                 // 空文字列を返す。
                 Ok(String::new())
             }
+            // M6(D40): blockquote → Typst の quote(block: true)。子ブロックを中に描画する。
+            NodePayload::Quote(_) => {
+                let mut children_typst = String::new();
+                for child_id in self.graph.children_of(node_id) {
+                    if self.is_hidden(child_id) {
+                        continue;
+                    }
+                    children_typst.push_str(&self.render_node(child_id, depth)?);
+                }
+                Ok(format!("#quote(block: true)[\n{}] <{}>\n\n", children_typst, label(node_id)))
+            }
+            // M6(D40): 水平線 → 全幅の罫線。
+            NodePayload::ThematicBreak(_) => {
+                Ok(format!("#line(length: 100%, stroke: 0.5pt + luma(150)) <{}>\n\n", label(node_id)))
+            }
         }
     }
 
@@ -290,14 +308,23 @@ impl<'a> TypstRenderer<'a> {
         depth: usize,
         indent: usize,
     ) -> Result<String, String> {
-        let marker = if l.ordered { "+" } else { "-" };
         let pad = "  ".repeat(indent);
         let mut out = String::new();
+
+        // M6(D40、監査②5): 順序リストの開始値。Typst のマークアップ記法(`+`)には
+        // 開始値指定が無いため、start がある場合は最初の項目のみ `N.` の明示番号で
+        // 書く(Typst は以降の `+` を連番として継続する)。
+        let mut next_explicit_number = l.start.filter(|_| l.ordered);
 
         for child_id in self.graph.children_of(list_id) {
             if self.is_hidden(child_id) {
                 continue;
             }
+            let marker = match (l.ordered, next_explicit_number.take()) {
+                (true, Some(n)) => format!("{n}."),
+                (true, None) => "+".to_string(),
+                (false, _) => "-".to_string(),
+            };
             let child_node = self
                 .graph
                 .nodes
@@ -308,6 +335,12 @@ impl<'a> TypstRenderer<'a> {
                 NodePayload::Para(p) => {
                     let inline = p.inline.clone();
                     let content = self.render_inlines(&inline)?;
+                    // M6(D40 Tier2): タスクリストのチェック状態をチェックボックス記号で描画。
+                    let content = match p.checked {
+                        Some(true) => format!("☑ {content}"),
+                        Some(false) => format!("☐ {content}"),
+                        None => content,
+                    };
                     out.push_str(&format!("{}{} {} <{}>\n", pad, marker, content, label(child_id)));
                     // 項目の下にネストした子リスト(D24)があれば、1段深いインデントで続ける。
                     let sub_ids = self.graph.children_of(child_id);
@@ -346,6 +379,8 @@ impl<'a> TypstRenderer<'a> {
                         EmphKind::Strong => out.push_str(&format!("*{}*", inner)),
                         EmphKind::Em => out.push_str(&format!("_{}_", inner)),
                         EmphKind::Code => out.push_str(&format!("`{}`", inner)),
+                        // M6(D40 Tier2): 取消線。
+                        EmphKind::Strike => out.push_str(&format!("#strike[{}]", inner)),
                     };
                 }
                 Inline::Math { tree } => {
@@ -363,6 +398,22 @@ impl<'a> TypstRenderer<'a> {
                         let inner = self.render_inlines(&a.inline)?;
                         out.push_str(&format!("[{}] <{}>", inner, label(*to)));
                     }
+                }
+                // M6(D40): 外部リンク → Typst の #link(URL)[表示テキスト]。
+                Inline::Link { url, text } => {
+                    let display = if text.is_empty() { url } else { text };
+                    out.push_str(&format!("#link(\"{}\")[{}]", typst_string_escape(url), typst_escape(display)));
+                }
+                // M6(D40): インライン画像。紙面ではリモート URL を実描画しない
+                // (Typst の image() はローカルパス前提)ため、alt + URL リンクの
+                // プレースホルダ表記にする(裁量、最終報告参照)。
+                Inline::Image { url, alt } => {
+                    out.push_str(&format!(
+                        "[画像: {}] (#link(\"{}\")[{}])",
+                        typst_escape(alt),
+                        typst_string_escape(url),
+                        typst_escape(url)
+                    ));
                 }
             }
         }

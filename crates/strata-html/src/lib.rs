@@ -282,6 +282,15 @@ impl<'a> HtmlRenderer<'a> {
                 out.push_str("</dl>\n");
                 Ok(out)
             }
+            // M6(D40): strata-html は凍結対象(コンパイルを保つための最小維持のみ)。
+            NodePayload::Quote(_) => {
+                let mut children_html = String::new();
+                for child_id in self.graph.children_of(node_id) {
+                    children_html.push_str(&self.render_node(child_id, depth)?);
+                }
+                Ok(format!("<blockquote>\n{children_html}</blockquote>\n"))
+            }
+            NodePayload::ThematicBreak(_) => Ok("<hr>\n".to_string()),
         }
     }
 
@@ -297,6 +306,8 @@ impl<'a> HtmlRenderer<'a> {
                         EmphKind::Strong => "strong",
                         EmphKind::Em => "em",
                         EmphKind::Code => "code",
+                        // M6(D40): 凍結対象の最小維持。
+                        EmphKind::Strike => "del",
                     };
                     let inner = self.render_inlines(children)?;
                     out.push_str(&format!("<{tag}>{inner}</{tag}>"));
@@ -337,6 +348,13 @@ impl<'a> HtmlRenderer<'a> {
                             out.push_str(&format!("<span id=\"anchor-{}\">{}</span>", to.0, inner));
                         }
                     }
+                }
+                // M6(D40): 凍結対象の最小維持(外部リンク/画像)。
+                Inline::Link { url, text } => {
+                    out.push_str(&format!("<a href=\"{}\">{}</a>", html_escape(url), html_escape(text)));
+                }
+                Inline::Image { url, alt } => {
+                    out.push_str(&format!("<img src=\"{}\" alt=\"{}\">", html_escape(url), html_escape(alt)));
                 }
             }
         }

@@ -197,6 +197,9 @@ pub fn node_type_name(p: &NodePayload) -> &'static str {
         NodePayload::Value(_) => "value",
         NodePayload::Document(_) => "document",
         NodePayload::Record(_) => "record",
+        // M6(D40)。
+        NodePayload::Quote(_) => "quote",
+        NodePayload::ThematicBreak(_) => "thematic-break",
     }
 }
 
@@ -209,6 +212,9 @@ fn flatten_inline(inline: &[strata_core::Inline]) -> String {
             I::Emph { children, .. } => out.push_str(&flatten_inline(children)),
             I::Ref { text, .. } => out.push_str(text),
             I::Term { text, .. } => out.push_str(text),
+            // M6(D40): 外部リンクは表示テキスト、画像は alt。
+            I::Link { text, .. } => out.push_str(text),
+            I::Image { alt, .. } => out.push_str(alt),
             I::Anchor { .. } => {}
             I::Math { .. } => {}
         }

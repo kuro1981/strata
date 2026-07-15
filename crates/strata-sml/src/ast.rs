@@ -8,10 +8,18 @@
 //! `inline.rs` / `table.rs` はここに定義された型を消費するだけで、
 //! 型そのものを追加・変更する必要が無いことを意図している。
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::span::Span;
+
+/// 参照スタイルリンクの定義表(M6 D40)。正規化ラベル(trim + lowercase)→ url のスパン。
+/// 定義行は非可視メタ(グラフに段落ノードを作らない)なので、値そのもの(文字列)
+/// ではなくソース中の url の位置(Span)を持たせ、他のインライン参照と同じく
+/// ゼロコピーで扱えるようにする。
+pub(crate) type RefDefs = HashMap<String, Span>;
 
 // ---- ドキュメント / ブロック -------------------------------------------------
 
@@ -64,12 +72,38 @@ pub enum BlockKind {
     Heading { level: u8, inline: Vec<SmlInline>, id_tag: Option<IdTag> },
     Paragraph { inline: Vec<SmlInline> },
     /// フラットなリスト(`- ` / `N. `)。項目 = 1行 = 1段落(ネストは保留、sml-spec §10)。
-    List { ordered: bool, items: Vec<ListItem> },
+    List {
+        ordered: bool,
+        items: Vec<ListItem>,
+        /// 順序リストの開始値(M6 D40)。`5. fifth` のように1以外から始まる場合に保持。
+        start: Option<u64>,
+    },
     /// `::table` / `::math` / `::figure`。
     Fence(FenceBlock),
     /// コードフェンス(```` ```lang ````)。開始行末尾に `{#id}` を書ける(D10、
     /// 2026-07-14 改定。行型ブロックとして扱う — sml-spec §2)。
     CodeFence { lang: String, body: Span, id_tag: Option<IdTag> },
+    /// 参照スタイルリンクの定義行(M6 D40)。`[label]: url "title"`。非可視メタ
+    /// (build はノードを作らない)。
+    LinkRefDef { label: String, url: Span, title: Option<Span> },
+    /// blockquote(`>` 行群、M6 D40)。子ブロックは行頭 `> ` を除去した上での
+    /// 再帰パース結果(v0 は1段。ネスト引用は裁量、最終報告参照)。
+    Quote { blocks: Vec<SmlBlock> },
+    /// 水平線(単独行 `---`/`***`/`___`、M6 D40)。
+    ThematicBreak,
+    /// GFM パイプ表(M6 D40 Tier2)。フラット2次元へブリッジする(header セル =
+    /// 列 member label、行 key は自動採番)。
+    GfmTable(GfmTableBody),
+}
+
+/// GFM パイプ表の本体(M6 D40)。ヘッダ行 + 区切り行 + データ行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GfmTableBody {
+    /// ヘッダセル(各列のラベル。生テキストのスパン)。
+    pub header: Vec<Span>,
+    /// データ行。各行は列数ぶんの型付きセル値(D4 と同じ `CellRaw`。足りない列は
+    /// `CellRaw::Empty`)。
+    pub rows: Vec<Vec<CellRaw>>,
 }
 
 /// リスト項目。行末に自身の `{#id}` を持ちうる(行型ブロック、sml-spec §3.3)。
@@ -84,6 +118,9 @@ pub struct ListItem {
     /// 別に高々1つだけ持てる(項目内複数ブロックは引き続き保留 §10)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child: Option<Box<ListBlock>>,
+    /// GFM タスクリストのチェック状態(M6 D40)。`- [ ]`/`- [x]` の項目のみ `Some`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
 }
 
 /// ネストしたリスト1つ(D24)。トップレベルの `BlockKind::List` と同形。ネストした
@@ -93,6 +130,7 @@ pub struct ListItem {
 pub struct ListBlock {
     pub ordered: bool,
     pub items: Vec<ListItem>,
+    pub start: Option<u64>,
 }
 
 // ---- ID / エイリアス --------------------------------------------------------
@@ -150,6 +188,13 @@ pub enum SmlInline {
     MathTex(Span),
     Ref { scheme: RefScheme, target: RefTarget, coord: Option<CellCoord>, text: Span },
     TermRef { name_or_id: RefTarget, text: Span },
+    /// バックスラッシュエスケープされた1文字(M6 D40)。`span` は `\` を含む2バイト
+    /// (`\` + ASCII 記号1文字)。build はこの span の2バイト目だけを Text にする。
+    Escaped(Span),
+    /// 外部リンク(`[text](https://…)` / autolink `<https://…>`、M6 D40)。
+    Link { url: Span, text: Span },
+    /// インライン画像(`![alt](url)`、M6 D40)。
+    Image { url: Span, alt: Span },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +202,8 @@ pub enum EmphKind {
     Strong,
     Em,
     Code,
+    /// `~~取消線~~`(M6 D40 Tier2)。
+    Strike,
 }
 
 /// インライン参照のスキーム(sml-spec §5.2)。

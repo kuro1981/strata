@@ -30,6 +30,8 @@ pub(crate) enum NodeKindTag {
     Code,
     /// `::record` フェンス(D28、sml-spec §1.5)。
     Record,
+    /// blockquote(M6 D40)。
+    Quote,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -122,6 +124,21 @@ fn register_block(
         BlockKind::CodeFence { id_tag, .. } => {
             register_line_type(block.span, id_tag, NodeKindTag::Code, reg, alias_defs, errors);
         }
+        // M6(D40): blockquote はプローズ扱い(前置属性行で id)。中身のブロックも
+        // 再帰的に登録する。GFM 表もプローズ扱い(Table ノードへブリッジ)。
+        BlockKind::Quote { blocks } => {
+            register_prose(block.span, &block.attrs, NodeKindTag::Quote, reg, alias_defs, errors);
+            for inner in blocks {
+                register_block(inner, reg, alias_defs, errors);
+            }
+        }
+        BlockKind::GfmTable(_) => {
+            register_prose(block.span, &block.attrs, NodeKindTag::Table, reg, alias_defs, errors);
+        }
+        // M6(D40): 参照リンク定義行は非可視メタ(ノードを作らない)。水平線は fmt が
+        // ID を注入しない(SML 上に ID の置き場が無い)ため、ここでは登録せず Pass 2
+        // (convert.rs)が文書内位置から決定的に ID を導出する(裁量、最終報告参照)。
+        BlockKind::LinkRefDef { .. } | BlockKind::ThematicBreak => {}
     }
 }
 

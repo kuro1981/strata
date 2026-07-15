@@ -132,24 +132,102 @@ fn plan_frontmatter_id(
 }
 
 fn plan_block(src: &str, block: &SmlBlock, idgen: &mut dyn FnMut() -> Ulid, patches: &mut Vec<Patch>) {
+    plan_block_at(src, block, idgen, patches, 0);
+}
+
+/// `quote_depth` は blockquote のネスト深さ(M6 D40)。深さ d のブロックの直前に
+/// 挿入する `[id=ULID]` 行には `"> "` × d のマーカー前置が必要(でないと挿入行が
+/// 引用の外に出て、引用が分断される)。
+fn plan_block_at(
+    src: &str,
+    block: &SmlBlock,
+    idgen: &mut dyn FnMut() -> Ulid,
+    patches: &mut Vec<Patch>,
+    quote_depth: usize,
+) {
     match &block.kind {
-        BlockKind::Heading { id_tag, .. } => plan_line_type_id(src, block, id_tag, idgen, patches),
+        BlockKind::Heading { id_tag, .. } => plan_heading_id(src, block, id_tag, idgen, patches),
         BlockKind::Fence(fb) => plan_line_type_id(src, block, &fb.id_tag, idgen, patches),
         // コードフェンス開始行も行型ブロック(D10、2026-07-14 改定)。
         BlockKind::CodeFence { id_tag, .. } => plan_line_type_id(src, block, id_tag, idgen, patches),
-        BlockKind::Paragraph { .. } => plan_prose_id(src, block, idgen, patches),
+        BlockKind::Paragraph { .. } => plan_prose_id(src, block, idgen, patches, quote_depth),
         BlockKind::List { items, .. } => {
             // リスト全体の ID は前置属性行(プローズ扱い、D11)→ 各項目の順(D-B4)。
             // D24(2026-07-14 裁定): ネスト項目にも同じ規則で ID を注入する。子リストは
             // 親項目の行の直後に現れるため、文書順は「親項目 → その子リストの各項目
             // (再帰) → 次の兄弟項目」になる。
-            plan_prose_id(src, block, idgen, patches);
+            plan_prose_id(src, block, idgen, patches, quote_depth);
             plan_list_items_ids(src, items, idgen, patches);
         }
+        // M6(D40): blockquote・GFM 表もプローズ扱い(前置属性行、裁量・最終報告参照)。
+        // blockquote は中身のブロックにも再帰的に ID を注入する。
+        //
+        // パッチ順序の注意: 引用自身の `[id=]` 挿入と、引用先頭行の内側ブロックの
+        // `> [id=]` 挿入は**同じオフセット**(引用の1行目の行頭)になる。
+        // `apply_patches` は同一オフセットでは「後に適用されたパッチほどバッファ上で
+        // 先(上)に来る」ため、引用自身のパッチを内側のパッチより**後ろ**に置く
+        // (plan_patches のフロントマターと同じ理屈)。ID の発行順自体は文書順
+        // (引用 → 内側)を維持する。
+        BlockKind::Quote { blocks } => {
+            let mut own = Vec::new();
+            plan_prose_id(src, block, idgen, &mut own, quote_depth);
+            for inner in blocks {
+                plan_block_at(src, inner, idgen, patches, quote_depth + 1);
+            }
+            patches.extend(own);
+        }
+        BlockKind::GfmTable(_) => plan_prose_id(src, block, idgen, patches, quote_depth),
+        // M6(D40): 参照リンク定義行は非可視メタ(ノードを作らない)なので ID を持たない。
+        // 水平線は build が決定的に ID を自動導出するため、fmt は関与しない(裁量、
+        // 最終報告参照)。
+        BlockKind::LinkRefDef { .. } | BlockKind::ThematicBreak => {}
     }
 }
 
-/// 行型ブロック(見出し・フェンスマーカー)の ID タグを計画する。
+/// 見出しの ID タグを計画する(M6 D40: Setext 見出し対応)。
+///
+/// ATX(`#` 始まり)は従来どおり自身の行末へ。**Setext 見出し**(own line が `#` で
+/// 始まらない)は、パーサが ID タグを「下線行の直前のテキスト行末尾」から抽出する
+/// (block.rs の `RawKind::SetextHeading` 処理)ため、挿入位置もそこに合わせる —
+/// でないと fmt が冪等でなくなる(裁量: fmt の ID 注入はテキスト最終行の行末
+/// ` {#ULID}`。最終報告参照)。
+fn plan_heading_id(
+    src: &str,
+    block: &SmlBlock,
+    id_tag: &Option<IdTag>,
+    idgen: &mut dyn FnMut() -> Ulid,
+    patches: &mut Vec<Patch>,
+) {
+    match id_tag {
+        None => {
+            let (line_start, content_end) = own_line_bounds(src, block);
+            // blockquote 内の見出し(M6 D40)は行頭に `> ` マーカーが付くため、
+            // マーカーと空白を読み飛ばしてから ATX(`#`)かどうかを判定する。
+            let stripped = src[line_start..content_end].trim_start_matches([' ', '>']);
+            let is_setext = !stripped.starts_with('#');
+            let at = if is_setext {
+                setext_last_text_line_end(src, block, line_start)
+            } else {
+                trim_trailing_ws(src, line_start, content_end)
+            };
+            let ulid = idgen();
+            patches.push(Patch { at, delete: 0, insert: format!(" {{#{ulid}}}") });
+        }
+        Some(tag) => plan_id_tag_relabel(tag, idgen, patches),
+    }
+}
+
+/// Setext 見出しブロックの「テキスト最終行」(下線行の直前の行)の内容末尾
+/// (行末空白の手前)を求める。
+fn setext_last_text_line_end(src: &str, block: &SmlBlock, line_start: usize) -> usize {
+    let lines = crate::scan::split_lines_range(src, Span::new(line_start, block.span.end));
+    debug_assert!(lines.len() >= 2, "Setext 見出しはテキスト行+下線行の最低2行を持つ");
+    // 末尾の空行(通常は無い)を除いた最後の行が下線行、その1つ前がテキスト最終行。
+    let text_line = &lines[lines.len().saturating_sub(2)];
+    trim_trailing_ws(src, text_line.content.start, text_line.content.end)
+}
+
+/// 行型ブロック(フェンスマーカー等)の ID タグを計画する。
 /// リスト項目は自身の行スパンを直接持つため `plan_list_item_id` が別途扱う。
 fn plan_line_type_id(
     src: &str,
@@ -208,13 +286,22 @@ fn plan_id_tag_relabel(tag: &IdTag, idgen: &mut dyn FnMut() -> Ulid, patches: &m
     }
 }
 
-/// 段落の ID を計画する(ケース2・3・5・6)。
-fn plan_prose_id(src: &str, block: &SmlBlock, idgen: &mut dyn FnMut() -> Ulid, patches: &mut Vec<Patch>) {
+/// 段落の ID を計画する(ケース2・3・5・6)。`quote_depth` は M6(D40)の blockquote
+/// ネスト深さ(挿入行のマーカー前置に使う。トップレベルは 0 = 前置なし)。
+fn plan_prose_id(
+    src: &str,
+    block: &SmlBlock,
+    idgen: &mut dyn FnMut() -> Ulid,
+    patches: &mut Vec<Patch>,
+    quote_depth: usize,
+) {
     match &block.attrs {
         None => {
             // ケース2: 前置属性行が無い → 先頭行の直前に `[id=ULID]\n` を挿入。
+            // 引用内(M6 D40)では挿入行自体も `> ` で始める必要がある。
             let ulid = idgen();
-            patches.push(Patch { at: block.span.start, delete: 0, insert: format!("[id={ulid}]\n") });
+            let prefix = "> ".repeat(quote_depth);
+            patches.push(Patch { at: block.span.start, delete: 0, insert: format!("{prefix}[id={ulid}]\n") });
         }
         Some(attrs) => match find_id_entry(attrs) {
             None => {

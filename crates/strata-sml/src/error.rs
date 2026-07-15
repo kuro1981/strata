@@ -78,15 +78,22 @@ pub enum DiagKind {
     /// フェンス属性 `date-format=` の値が未対応(v0 は `"YYYY年M月"` /
     /// `"YYYY年M月D日"` のみ)、またはリスト値など裸トークンでない形(D29)。
     BadDateFormat,
+    /// HTML ブロック/インラインらしき行(M6 D40 Tier3、意図的非対応)。意味グラフには
+    /// 落とさずリテラル扱いのまま `Warning` を出す。
+    HtmlNotSupported,
+    /// `![alt](ref:target)` のように画像が内部参照スキームを指している(M6 D40、
+    /// WP-C1.4 の裁量)。当面は明示的に拒否する — サポート外の組み合わせ。
+    ImageRefUnsupported,
 }
 
 impl DiagKind {
     /// D17: 種別ごとの既定 severity。`Error` が既定で、`Warning` は明示した2種別のみ。
     pub fn severity(self) -> Severity {
         match self {
-            DiagKind::DuplicateFrontmatterKey | DiagKind::UnknownAttrKey | DiagKind::DuplicateRecordKey => {
-                Severity::Warning
-            }
+            DiagKind::DuplicateFrontmatterKey
+            | DiagKind::UnknownAttrKey
+            | DiagKind::DuplicateRecordKey
+            | DiagKind::HtmlNotSupported => Severity::Warning,
             _ => Severity::Error,
         }
     }

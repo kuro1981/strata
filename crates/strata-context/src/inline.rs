@@ -18,6 +18,9 @@ pub(crate) fn plain_text(inlines: &[Inline]) -> String {
             Inline::Emph { children, .. } => out.push_str(&plain_text(children)),
             Inline::Ref { text, .. } => out.push_str(text),
             Inline::Term { text, .. } => out.push_str(text),
+            // M6(D40): 外部リンクは表示テキスト、画像は alt をプレーンテキストとする。
+            Inline::Link { text, .. } => out.push_str(text),
+            Inline::Image { alt, .. } => out.push_str(alt),
             Inline::Math { .. } | Inline::Anchor { .. } => {}
         }
     }
@@ -37,6 +40,8 @@ pub(crate) fn render_inlines_md(graph: &Graph, inlines: &[Inline]) -> String {
                     EmphKind::Strong => out.push_str(&format!("**{}**", inner)),
                     EmphKind::Em => out.push_str(&format!("_{}_", inner)),
                     EmphKind::Code => out.push_str(&format!("`{}`", inner)),
+                    // M6(D40 Tier2): 取消線(GFM 記法)。
+                    EmphKind::Strike => out.push_str(&format!("~~{}~~", inner)),
                 }
             }
             Inline::Math { tree } => out.push_str(&format!("${}$", render_math_text(tree))),
@@ -58,6 +63,18 @@ pub(crate) fn render_inlines_md(graph: &Graph, inlines: &[Inline]) -> String {
                 if let Some(strata_core::NodePayload::Anchor(a)) = graph.nodes.get(to).map(|n| &n.payload) {
                     out.push_str(&render_inlines_md(graph, &a.inline));
                 }
+            }
+            // M6(D40): 外部リンク/画像は Markdown 記法そのままで出す(context ビューは
+            // Markdown なので情報を失わず自然に表現できる)。
+            Inline::Link { url, text } => {
+                if text == url {
+                    out.push_str(&format!("<{url}>"));
+                } else {
+                    out.push_str(&format!("[{}]({})", md_escape(text), url));
+                }
+            }
+            Inline::Image { url, alt } => {
+                out.push_str(&format!("![{}]({})", md_escape(alt), url));
             }
         }
     }

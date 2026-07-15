@@ -19,6 +19,7 @@ pub mod block;
 pub mod error;
 pub mod fmt;
 pub(crate) mod frontmatter;
+pub(crate) mod gfm_table;
 pub mod inline;
 pub mod record;
 pub mod scan;

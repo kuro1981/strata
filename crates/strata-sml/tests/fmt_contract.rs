@@ -58,6 +58,15 @@ fn samples() -> Vec<&'static str> {
         // D28/D29: recordフェンス(日本語キー・Date・Period・date-format 宣言)。
         // fmt はフェンスマーカー行への ID 注入のみで本体(キー: 値の列)は不変のはず。
         "::record {#basic-info}\n姓: 山田\n名: 太郎\n生年月日: 1997-03-15\n::\n\n::record\n[date-format=\"YYYY年M月\"]\n在籍期間: 2020年10月 〜 現在\n::\n",
+        // M6(D40): blockquote(内側の段落・見出し)+ 水平線 + Setext 見出し
+        // (複数行テキストの Setext を含む — ID はテキスト最終行の行末に注入される)
+        "> quoted para\n> second line\n\n> ## Quoted heading\n> under it\n\n---\n\nSetext Title\n=====\n\nTwo line\nsetext h2\n-----\n",
+        // M6(D40): GFM パイプ表 + タスクリスト + 代替マーカー + ordered start
+        "| A | B |\n| - | - |\n| 1 | 2 ms |\n\n- [ ] todo\n- [x] done\n\n* star item\n+ plus item\n\n5. fifth\n6. sixth\n",
+        // M6(D40): エスケープ・外部リンク・autolink・画像・取消線・参照スタイルリンク
+        "\\*not emphasis\\* and [Site](https://example.com) and <https://auto.example> here.\n\n![alt text](https://example.com/i.png) with ~~strike~~ and ***both***.\n\n[Example][ex]\n\n[ex]: https://example.com/ref \"Title\"\n",
+        // M6(D40): ~~~ フェンス + 見出し閉じ装飾
+        "# Closed heading ###\n\n~~~python\nx = a * 2 * b\n~~~\n",
     ]
 }
 
@@ -265,7 +274,11 @@ fn assert_attr_line_id_is_ulid(block: &SmlBlock, i: usize, kind_label: &str) {
 /// ULID の ID を持つことを検証する。リストは全項目に加えリスト全体の前置属性行 `id`
 /// (D11)、段落は属性行の `id` エントリ、見出し・フェンス・コードフェンスは IdTag。
 fn assert_all_blocks_have_ulid_ids(doc: &SmlDocument) {
-    for (i, block) in doc.blocks.iter().enumerate() {
+    assert_all_blocks_have_ulid_ids_in(&doc.blocks);
+}
+
+fn assert_all_blocks_have_ulid_ids_in(blocks: &[strata_sml::SmlBlock]) {
+    for (i, block) in blocks.iter().enumerate() {
         match &block.kind {
             BlockKind::Heading { id_tag, .. } => {
                 let tag = id_tag.as_ref().unwrap_or_else(|| panic!("heading #{i} has no id tag after fmt"));
@@ -311,6 +324,15 @@ fn assert_all_blocks_have_ulid_ids(doc: &SmlDocument) {
                 }
             }
             BlockKind::Paragraph { .. } => assert_attr_line_id_is_ulid(block, i, "paragraph"),
+            // M6(D40): blockquote・GFM 表もプローズ扱い(前置属性行で id)。blockquote は
+            // 中身のブロックも再帰的に検証する。水平線・参照リンク定義行は id を持たない
+            // ブロック種別なので検証対象外(裁量、最終報告参照)。
+            BlockKind::Quote { blocks } => {
+                assert_attr_line_id_is_ulid(block, i, "quote");
+                assert_all_blocks_have_ulid_ids_in(blocks);
+            }
+            BlockKind::GfmTable(_) => assert_attr_line_id_is_ulid(block, i, "gfm-table"),
+            BlockKind::ThematicBreak | BlockKind::LinkRefDef { .. } => {}
         }
     }
 }

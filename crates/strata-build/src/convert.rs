@@ -14,8 +14,8 @@ use strata_sml::EmphKind as SmlEmphKind;
 
 use strata_core::{
     Cell, CellValue, Chart, Code, DateValue, Dim, Document, EmphKind as CoreEmphKind, Encoding, Figure, Graph,
-    ImageFigure, Inline, List as CoreList, Mark, MathBlock, Member, Node, NodeId, NodePayload, Para, Record,
-    RecordEntry, Rel, Section, Table, Term,
+    ImageFigure, Inline, List as CoreList, Mark, MathBlock, Member, Node, NodeId, NodePayload, Para, Quote,
+    Record, RecordEntry, Rel, Section, Table, Term, ThematicBreak,
 };
 use strata_core::CellCoord as CoreCellCoord;
 use ulid::Ulid;
@@ -31,10 +31,20 @@ struct Builder<'a> {
     term_ids: HashMap<String, NodeId>,
     errors: Vec<BuildError>,
     ord: HashMap<NodeId, u32>,
+    /// M6(D40): 水平線ノードの決定的 ID 導出用の出現カウンタ(裁量、最終報告参照)。
+    hr_count: u32,
 }
 
 pub(crate) fn run(src: &str, doc: &SmlDocument, reg: Registry) -> (Graph, Option<NodeId>, Vec<BuildError>) {
-    let mut b = Builder { src, reg, graph: Graph::default(), term_ids: HashMap::new(), errors: Vec::new(), ord: HashMap::new() };
+    let mut b = Builder {
+        src,
+        reg,
+        graph: Graph::default(),
+        term_ids: HashMap::new(),
+        errors: Vec::new(),
+        ord: HashMap::new(),
+        hr_count: 0,
+    };
 
     let root = b.reg.document_id;
     if let Some(doc_id) = root {
@@ -73,6 +83,22 @@ impl<'a> Builder<'a> {
     }
 
     fn build_block(&mut self, block: &SmlBlock, stack: &mut Vec<(u8, NodeId)>, root: Option<NodeId>) {
+        // M6(D40): 参照リンク定義行は非可視メタ — グラフにノードを作らない(監査②4)。
+        if matches!(&block.kind, BlockKind::LinkRefDef { .. }) {
+            return;
+        }
+        // M6(D40): 水平線は SML 上に ID の置き場が無いため registry に登録されない。
+        // 文書内の出現順から決定的に ID を導出する(D27 の子 List ノードと同型の裁量)。
+        if matches!(&block.kind, BlockKind::ThematicBreak) {
+            let id = derive_thematic_break_id(root, self.hr_count);
+            self.hr_count += 1;
+            self.graph.insert(Node::new(id, NodePayload::ThematicBreak(ThematicBreak {})));
+            if let Some(p) = current_parent(stack, root) {
+                self.add_contains(p, id);
+            }
+            return;
+        }
+
         let Registration { id, .. } = self.reg.by_span[&block.span];
 
         match &block.kind {
@@ -95,19 +121,44 @@ impl<'a> Builder<'a> {
             }
             BlockKind::Paragraph { inline } => {
                 let inline = self.convert_inlines(id, inline);
-                self.graph.insert(Node::new(id, NodePayload::Para(Para { inline })));
+                self.graph.insert(Node::new(id, NodePayload::Para(Para { inline, checked: None })));
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
                 self.apply_block_attrs(id, &block.attrs);
             }
-            BlockKind::List { ordered, items } => {
-                self.graph.insert(Node::new(id, NodePayload::List(CoreList { ordered: *ordered })));
+            BlockKind::List { ordered, items, start } => {
+                // M6(D40、監査②5): 順序リストの開始値を保存する。1 は既定なので省略。
+                let start = start.filter(|&s| *ordered && s != 1);
+                self.graph.insert(Node::new(id, NodePayload::List(CoreList { ordered: *ordered, start })));
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
                 self.apply_block_attrs(id, &block.attrs);
                 self.build_list_items(id, items);
+            }
+            // M6(D40): blockquote — NodePayload::Quote。中身のブロックは Quote ノードを
+            // ルートとする独立の見出しスタックで再帰構築する(引用内の見出しネストが
+            // 外側の文書階層へ漏れないように)。
+            BlockKind::Quote { blocks } => {
+                self.graph.insert(Node::new(id, NodePayload::Quote(Quote {})));
+                if let Some(p) = current_parent(stack, root) {
+                    self.add_contains(p, id);
+                }
+                self.apply_block_attrs(id, &block.attrs);
+                let mut inner_stack: Vec<(u8, NodeId)> = Vec::new();
+                for inner in blocks {
+                    self.build_block(inner, &mut inner_stack, Some(id));
+                }
+            }
+            // M6(D40 Tier2): GFM パイプ表をフラット2次元の Table ノードへブリッジする。
+            BlockKind::GfmTable(tb) => {
+                let table = self.bridge_gfm_table(tb);
+                self.graph.insert(Node::new(id, NodePayload::Table(table)));
+                if let Some(p) = current_parent(stack, root) {
+                    self.add_contains(p, id);
+                }
+                self.apply_block_attrs(id, &block.attrs);
             }
             BlockKind::Fence(fb) => {
                 match fb.fence_kind {
@@ -129,6 +180,66 @@ impl<'a> Builder<'a> {
                 }
                 self.apply_block_attrs(id, &block.attrs);
             }
+            BlockKind::LinkRefDef { .. } | BlockKind::ThematicBreak => {
+                unreachable!("冒頭で早期リターン済み")
+            }
+        }
+    }
+
+    /// M6(D40 Tier2): GFM パイプ表 → フラット2次元 Table。列はヘッダセルから
+    /// 1次元(`col`)、行は自動採番の1次元(`row`、key は `r1`〜`rN`)を作る。
+    /// 列 member の key はヘッダテキストが key 字句(`[A-Za-z0-9_-]+`)に収まり
+    /// 重複しなければそのまま使い(`cell:` 参照で意味のある座標が書ける)、
+    /// 収まらなければ `c1`〜`cN` に落として元テキストを label に保持する(裁量、
+    /// 最終報告参照)。
+    fn bridge_gfm_table(&mut self, tb: &strata_sml::GfmTableBody) -> Table {
+        let header_texts: Vec<String> =
+            tb.header.iter().map(|s| s.slice(self.src).trim().to_string()).collect();
+
+        let mut col_keys: Vec<String> = Vec::with_capacity(header_texts.len());
+        for (i, h) in header_texts.iter().enumerate() {
+            let candidate_ok = !h.is_empty()
+                && h.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && !col_keys.contains(h);
+            col_keys.push(if candidate_ok { h.clone() } else { format!("c{}", i + 1) });
+        }
+
+        let col_members: Vec<Member> = header_texts
+            .iter()
+            .zip(&col_keys)
+            .map(|(h, key)| Member {
+                key: key.clone(),
+                label: if h == key { None } else { Some(vec![Inline::Text { s: h.clone() }]) },
+                children: vec![],
+            })
+            .collect();
+
+        let row_keys: Vec<String> = (1..=tb.rows.len()).map(|i| format!("r{i}")).collect();
+        let row_members: Vec<Member> =
+            row_keys.iter().map(|k| Member { key: k.clone(), label: None, children: vec![] }).collect();
+
+        let mut cells = Vec::new();
+        for (r, row) in tb.rows.iter().enumerate() {
+            for (c, raw) in row.iter().enumerate() {
+                if matches!(raw, CellRaw::Empty) {
+                    continue;
+                }
+                // GFM 表セルには座標スパンの概念が無い(型付きパースは層1で完了済みで
+                // Ref も解決不要な値が大半)ため、診断位置には空スパンを使う。
+                let value = self.convert_cell_raw(raw, Span::new(0, 0));
+                cells.push(Cell {
+                    row_path: vec![row_keys[r].clone()],
+                    col_path: vec![col_keys[c].clone()],
+                    value,
+                });
+            }
+        }
+
+        Table {
+            rows: vec![Dim { name: "row".to_string(), members: row_members }],
+            cols: vec![Dim { name: "col".to_string(), members: col_members }],
+            cells,
+            caption: None,
         }
     }
 
@@ -142,14 +253,16 @@ impl<'a> Builder<'a> {
         for item in items {
             let Registration { id: item_id, .. } = self.reg.by_span[&item.span];
             let inline = self.convert_inlines(item_id, &item.inline);
-            self.graph.insert(Node::new(item_id, NodePayload::Para(Para { inline })));
+            // M6(D40 Tier2): タスクリストのチェック状態を項目 Para に写す。
+            self.graph.insert(Node::new(item_id, NodePayload::Para(Para { inline, checked: item.checked })));
             self.add_contains(parent, item_id);
             if let Some(child) = &item.child {
                 // D24 時点では1項目につき子リストは高々1つなので position は常に 0
                 // (list_child.rs のドキュメント参照)。
                 let child_list_id = list_child::derive_list_child_id(item_id, 0);
+                let start = child.start.filter(|&s| child.ordered && s != 1);
                 self.graph
-                    .insert(Node::new(child_list_id, NodePayload::List(CoreList { ordered: child.ordered })));
+                    .insert(Node::new(child_list_id, NodePayload::List(CoreList { ordered: child.ordered, start })));
                 self.add_contains(item_id, child_list_id);
                 self.build_list_items(child_list_id, &child.items);
             }
@@ -249,13 +362,40 @@ impl<'a> Builder<'a> {
         id
     }
 
+    /// M6(D40): エスケープ(`\*` → リテラル `*`)の unescape はここ(グラフ側)で
+    /// 行う — ソース(SML テキスト)は fmt のバイト保存契約によりバックスラッシュ込みで
+    /// 保存されたまま(監査②1)。unescape の結果、隣接する Text が細切れになるため、
+    /// 連続する `Inline::Text` はここで1つに結合する。
     fn convert_inlines(&mut self, from: NodeId, inlines: &[SmlInline]) -> Vec<Inline> {
-        inlines.iter().map(|i| self.convert_inline(from, i)).collect()
+        let mut out: Vec<Inline> = Vec::with_capacity(inlines.len());
+        for i in inlines {
+            let conv = self.convert_inline(from, i);
+            if let (Some(Inline::Text { s: prev }), Inline::Text { s }) = (out.last_mut(), &conv) {
+                prev.push_str(s);
+            } else {
+                out.push(conv);
+            }
+        }
+        out
     }
 
     fn convert_inline(&mut self, from: NodeId, inline: &SmlInline) -> Inline {
         match inline {
             SmlInline::Text(span) => Inline::Text { s: span.slice(self.src).to_string() },
+            // M6(D40、監査②1): `\X` はグラフ上では unescape 済みのリテラル `X`。
+            SmlInline::Escaped(span) => {
+                let escaped = span.slice(self.src);
+                Inline::Text { s: escaped[1..].to_string() }
+            }
+            // M6(D40、監査②2): 外部リンク/画像。Edge は張らない(意味エッジ対象外)。
+            SmlInline::Link { url, text } => Inline::Link {
+                url: url.slice(self.src).to_string(),
+                text: text.slice(self.src).to_string(),
+            },
+            SmlInline::Image { url, alt } => Inline::Image {
+                url: url.slice(self.src).to_string(),
+                alt: alt.slice(self.src).to_string(),
+            },
             SmlInline::Emph { kind, children } => {
                 Inline::Emph { kind: convert_emph_kind(*kind), children: self.convert_inlines(from, children) }
             }
@@ -485,7 +625,21 @@ fn convert_emph_kind(k: SmlEmphKind) -> CoreEmphKind {
         SmlEmphKind::Strong => CoreEmphKind::Strong,
         SmlEmphKind::Em => CoreEmphKind::Em,
         SmlEmphKind::Code => CoreEmphKind::Code,
+        SmlEmphKind::Strike => CoreEmphKind::Strike,
     }
+}
+
+/// M6(D40): 水平線ノードの決定的 ID 導出(裁量)。SML 上に ID の置き場が無いため、
+/// D27(子 List ノード)と同型に「文書ルート ID(無ければ nil)+ 文書内の出現順」
+/// から Sha256 で導出する。同一入力の再 build で ID が一致する(ID 安定)。
+fn derive_thematic_break_id(root: Option<NodeId>, index: u32) -> NodeId {
+    use sha2::{Digest, Sha256};
+    let ns = root.map(|r| r.0).unwrap_or_else(Ulid::nil);
+    let mut hasher = Sha256::new();
+    hasher.update(format!("strata:thematic-break:v0:{ns}:{index}"));
+    let hash = hasher.finalize();
+    let bytes: [u8; 16] = hash[..16].try_into().expect("SHA-256 digest is 32 bytes");
+    NodeId(Ulid(u128::from_be_bytes(bytes)))
 }
 
 fn attr_value_tokens(v: &AttrValue) -> Vec<String> {

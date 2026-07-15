@@ -65,35 +65,36 @@ fn draft_and_formatted_are_isomorphic_ignoring_id_information() {
     }
 }
 
-// ---- 3. 非対応 Markdown のフォールバック ---------------------------------------
+// ---- 3. M6(D40)で解消された構文の構造化 ----------------------------------------
 //
-// design.md §5: blockquote / GFM表 / setext見出しは v0 が解釈しないサブセット外の
-// 構文であり、エラーにはせず段落(プレーンテキスト)として読む。
+// 旧 design.md §5 は blockquote / GFM表 / setext見出しを「v0 が解釈しないサブセット外
+// の構文であり、エラーにはせず段落(プレーンテキスト)として読む」としていたが、
+// M6(D40、監査②9・④)でこれらは専用のブロック種別として構造化されるようになった。
 
 #[test]
-fn blockquote_falls_back_to_paragraph_without_diags() {
+fn blockquote_becomes_quote_block_without_diags() {
     let src = "> quoted text\n";
     let out = strata_sml::parse(src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert_eq!(out.doc.blocks.len(), 1);
-    assert!(matches!(out.doc.blocks[0].kind, BlockKind::Paragraph { .. }));
+    assert!(matches!(out.doc.blocks[0].kind, BlockKind::Quote { .. }));
 }
 
 #[test]
-fn gfm_table_falls_back_to_paragraph_without_diags() {
+fn gfm_table_becomes_gfm_table_block_without_diags() {
     let src = "| a | b |\n| - | - |\n| 1 | 2 |\n";
     let out = strata_sml::parse(src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert_eq!(out.doc.blocks.len(), 1);
-    assert!(matches!(out.doc.blocks[0].kind, BlockKind::Paragraph { .. }));
+    assert!(matches!(out.doc.blocks[0].kind, BlockKind::GfmTable(_)));
 }
 
 #[test]
-fn setext_heading_falls_back_to_paragraph_without_diags() {
-    // 下線式見出し。v0 は ATX(`#`)のみ対応(design.md §5)。
+fn setext_heading_becomes_heading_without_diags() {
+    // 下線式見出し(監査②9)。`---` は Setext H2 として Heading になる。
     let src = "Title\n---\n";
     let out = strata_sml::parse(src);
     assert!(out.diags.is_empty(), "{:?}", out.diags);
     assert_eq!(out.doc.blocks.len(), 1);
-    assert!(matches!(out.doc.blocks[0].kind, BlockKind::Paragraph { .. }));
+    assert!(matches!(out.doc.blocks[0].kind, BlockKind::Heading { level: 2, .. }));
 }
