@@ -5,7 +5,8 @@ use strata_sml::Span;
 
 /// トップレベル CLI。`fmt` / `build` / `render` サブコマンドを提供する(旧 YAML→HTML
 /// フローは M4 の vault 削除(docs/sml-render-m4-handoff.md D-R1)で撤去済み)。
-/// `render` は canonical グラフ(層2)から Typst マークアップを直接出力する
+/// `render` は canonical グラフ(層2)から Typst マークアップ(既定)または
+/// 素の Markdown/GFM(`--format md`、sml-spec.md §1.8 D38)を直接出力する
 /// (D-R3。中間 JSON は介さない。strata-html への導線は持たない — D19)。
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Strata Document Builder CLI", long_about = None)]
@@ -20,7 +21,8 @@ enum Command {
     Fmt(FmtArgs),
     /// Build an SML file into a canonical graph (JSON)
     Build(BuildArgs),
-    /// Render an SML file into Typst markup (build + render, no intermediate JSON)
+    /// Render an SML file into Typst markup or plain Markdown/GFM (--format,
+    /// D38). Build + render, no intermediate JSON.
     Render(RenderArgs),
     /// Apply a declarative view definition to an SML file's canonical graph,
     /// producing template-consumable data files (YAML). See docs/view-def-v1.md.
@@ -51,14 +53,28 @@ struct BuildArgs {
     output: Option<PathBuf>,
 }
 
+/// `render --format` の選択肢(D19 改定、D38)。既定は `typst`(一次レンダラ)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RenderFormat {
+    Typst,
+    Md,
+}
+
 #[derive(ClapArgs, Debug)]
 struct RenderArgs {
     /// SML file to render
     file: PathBuf,
 
-    /// Write the Typst source to this file instead of stdout
+    /// Write the rendered source to this file instead of stdout. The file
+    /// extension is taken verbatim from what the caller passes (not
+    /// inferred from --format).
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Output format: `typst` (default, primary renderer) or `md` (plain
+    /// Markdown / GFM, D38).
+    #[arg(long = "format", value_enum, default_value_t = RenderFormat::Typst)]
+    format: RenderFormat,
 
     /// Hide blocks (and their contains subtree) carrying this class (D23).
     /// May be repeated: `--hide note --hide actual-name`.
@@ -401,11 +417,13 @@ fn run_build(args: BuildArgs) {
     }
 }
 
-/// `strata-cli render` サブコマンド(docs/sml-render-m4-handoff.md D-R3)。
+/// `strata-cli render` サブコマンド(docs/sml-render-m4-handoff.md D-R3、
+/// `--format md` は sml-spec.md §1.8 D38・docs/md-render-handoff.md WP-M3)。
 ///
-/// 内部で `strata_build::build` → `strata_typst::render_to_typst` を直結する
-/// (中間 JSON なし)。exit code: 成功 0 / 読み書き失敗 1 / BuildError・render エラー
-/// 2。`root: None`(フロントマター無し)は D21 の案内文言で exit 2。
+/// 内部で `strata_build::build` → `strata_typst::render_to_typst_with_hide` /
+/// `strata_md::render_to_md_with_hide` のいずれかを直結する(中間 JSON なし)。
+/// exit code: 成功 0 / 読み書き失敗 1 / BuildError・render エラー 2。
+/// `root: None`(フロントマター無し)は D21 の案内文言で exit 2(両フォーマット共通)。
 fn run_render(args: RenderArgs) {
     let src = match fs::read_to_string(&args.file) {
         Ok(s) => s,
@@ -438,34 +456,47 @@ fn run_render(args: RenderArgs) {
     };
 
     // D-R2 1.: フォールバック文書名は入力ファイル名(拡張子抜き)を渡す(裁量。
-    // Document.title も最初の H1 も無い場合にのみ使われる)。
+    // Document.title も最初の H1 も無い場合にのみ使われる。`--format md` は現状
+    // これを本文に出さない — strata_md::render_to_md_with_hide のドキュメント参照)。
     let fallback_title = args.file.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
 
-    // D23: `--hide` 無しでも常に `render_to_typst_with_hide` を経由する(hide が
-    // 空なら挙動は従来の `render_to_typst` と完全一致し、warnings も常に空になる)。
-    let render_out = match strata_typst::render_to_typst_with_hide(&out.graph, root, fallback_title, &args.hide) {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("render error: {}", e);
-            std::process::exit(2);
-        }
+    // D23: `--hide` 無しでも常に `*_with_hide` を経由する(hide が空なら挙動は
+    // 従来の `render_to_typst`/`render_to_md` と完全一致し、warnings も常に空になる)。
+    // 両フォーマットの `RenderOutput`(strata_typst / strata_md)は独立した型だが
+    // 形(text/warnings)が同じなので、ここで `(String, Vec<String>)` に揃えて以降を
+    // フォーマット非依存の共通コードにする。
+    let (text, warnings): (String, Vec<String>) = match args.format {
+        RenderFormat::Typst => match strata_typst::render_to_typst_with_hide(&out.graph, root, fallback_title, &args.hide) {
+            Ok(o) => (o.text, o.warnings),
+            Err(e) => {
+                eprintln!("render error: {}", e);
+                std::process::exit(2);
+            }
+        },
+        RenderFormat::Md => match strata_md::render_to_md_with_hide(&out.graph, root, fallback_title, &args.hide) {
+            Ok(o) => (o.text, o.warnings),
+            Err(e) => {
+                eprintln!("render error: {}", e);
+                std::process::exit(2);
+            }
+        },
     };
 
     // D23: 非表示ノードへの Ref を剥がした際の警告。fmt/build の Warning と同じ
     // stderr 出力(exit code には影響しない)。
-    for w in &render_out.warnings {
+    for w in &warnings {
         eprintln!("{}", w);
     }
 
     match args.output {
         Some(path) => {
-            if let Err(e) = write_atomic(&path, &render_out.text) {
+            if let Err(e) = write_atomic(&path, &text) {
                 eprintln!("Failed to write output file: {}", e);
                 std::process::exit(1);
             }
         }
         None => {
-            print!("{}", render_out.text);
+            print!("{}", text);
         }
     }
     std::process::exit(0);

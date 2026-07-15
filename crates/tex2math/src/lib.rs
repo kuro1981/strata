@@ -423,6 +423,136 @@ pub fn parse_normalized(tex: &str) -> Result<MathNode, ParseError> {
     parse(tex).map(normalize)
 }
 
+// --- WP-M1(sml-spec §1.8 D38): MathNode → TeX 逆直列化 -----------------------------
+//
+// `render --format md` の数式出力(`$...$`/`$$...$$`)のために MathNode 木を TeX
+// テキストへ書き戻す。パーサの厳密な逆関数である必要はない(文字列の完全復元は
+// 要求しない、sml-spec §1.8 WP-M1)。要求されるのは「TeX として正しく再パースでき、
+// 元の MathNode と構造同値になる」こと(round-trip テストで固定する)。
+//
+// 括弧の方針(裁量): `Sub`/`Sup`/`SubSup`/`UnderOver` の `base` は常に `{...}` で
+// くるむ。TeX のグルーピングは「透過」(`parse_group` は中身をそのまま返す。複数
+// トークンの場合のみ `Row` になる)なので、余分な `{}` を足しても再パース結果は
+// 変わらない。これにより「base が Row(複数トークンの積等)のときだけ波括弧が要る」
+// という条件分岐を避け、実装を単純化した。
+pub fn to_tex(node: &MathNode) -> String {
+    match node {
+        MathNode::Num { v } => v.clone(),
+        MathNode::Ident { v } => ident_to_tex(v),
+        MathNode::Op { v } => op_to_tex(v),
+        MathNode::Row { items } => items.iter().map(to_tex).collect::<Vec<_>>().join(" "),
+        MathNode::Frac { num, den } => format!("\\frac{{{}}}{{{}}}", to_tex(num), to_tex(den)),
+        MathNode::Sup { base, sup } => format!("{}^{{{}}}", to_tex_base(base), to_tex(sup)),
+        MathNode::Sub { base, sub } => format!("{}_{{{}}}", to_tex_base(base), to_tex(sub)),
+        MathNode::SubSup { base, sub, sup } => {
+            format!("{}_{{{}}}^{{{}}}", to_tex_base(base), to_tex(sub), to_tex(sup))
+        }
+        MathNode::UnderOver { base, under, over } => to_tex_underover(base, under.as_deref(), over.as_deref()),
+        MathNode::Sqrt { body } => format!("\\sqrt{{{}}}", to_tex(body)),
+        MathNode::Root { radicand, index } => format!("\\sqrt[{}]{{{}}}", to_tex(index), to_tex(radicand)),
+        MathNode::Fenced { open, close, body } => {
+            format!("\\left{} {} \\right{}", delim_to_tex(open), to_tex(body), delim_to_tex(close))
+        }
+        MathNode::Text { s } => format!("\\text{{{}}}", s),
+    }
+}
+
+/// `\hat{x}` は専用の `UnderOver{ under: None, over: Some(Op("^")) }` 形で表現される
+/// (`parse_command` の "hat" アーム)。この特殊形は `\hat{...}` として書き戻す。それ
+/// 以外の一般形(`normalize` が大型演算子の Sub/Sup をたたみ込んだもの等)は
+/// `base_{under}^{over}` として書き戻す(再パースは Sub/Sup/SubSup になり、
+/// UnderOver への畳み込みは `normalize` 側の仕事なので、素の `parse` との構造同値は
+/// 崩れない — round-trip テストは `parse_normalized` 側で確認する)。
+fn to_tex_underover(base: &MathNode, under: Option<&MathNode>, over: Option<&MathNode>) -> String {
+    if under.is_none() && matches!(over, Some(MathNode::Op { v }) if v == "^") {
+        return format!("\\hat{{{}}}", to_tex(base));
+    }
+    let mut out = to_tex_base(base);
+    if let Some(u) = under {
+        out.push_str(&format!("_{{{}}}", to_tex(u)));
+    }
+    if let Some(o) = over {
+        out.push_str(&format!("^{{{}}}", to_tex(o)));
+    }
+    out
+}
+
+/// `Sub`/`Sup`/`SubSup`/`UnderOver` の `base` の書き戻し。`Num`/`Ident`/`Op` は
+/// それ自体が1トークンなので波括弧無しでそのまま出す(`y_i` のように素直な見た目に
+/// なる。`render --format md` は人間向けビューなので読みやすさを優先する裁量)。
+/// それ以外(`Row`/`Frac`/`Sqrt` 等の複合式)は常に `{...}` でくるむ — TeX の
+/// グルーピングは透過(`parse_group` は中身をそのまま返す)なので、この判定を
+/// 誤って複合式を裸で出しても構造は壊れない(安全側に倒す簡易ヒューリスティック)。
+fn to_tex_base(base: &MathNode) -> String {
+    match base {
+        MathNode::Num { .. } | MathNode::Ident { .. } | MathNode::Op { .. } => to_tex(base),
+        _ => format!("{{{}}}", to_tex(base)),
+    }
+}
+
+/// `\left`/`\right` の区切り文字。1文字の記号(`(` 等)はそのまま、複数文字の
+/// コマンド名(`langle` 等、`parse_left_right` が `Tok::Command` から先頭 `\` を
+/// 落として保持したもの)は `\` を付け直す。
+fn delim_to_tex(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic()) {
+        format!("\\{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// `Ident` の書き戻し。1文字の ASCII 文字はそのまま、ギリシャ文字記号は
+/// `greek()` の逆引きで `\alpha` 等に戻す。
+fn ident_to_tex(v: &str) -> String {
+    if let Some(name) = reverse_greek(v) {
+        format!("\\{name} ")
+    } else {
+        v.to_string()
+    }
+}
+
+/// `Op` の書き戻し。大型演算子(∑∏∫)・named_op の記号・`lim` はコマンド名へ逆変換、
+/// それ以外(素の ASCII 記号 `+` `=` `(` 等)はそのまま出す。
+fn op_to_tex(v: &str) -> String {
+    match v {
+        "∑" => "\\sum ".to_string(),
+        "∏" => "\\prod ".to_string(),
+        "∫" => "\\int ".to_string(),
+        "lim" => "\\lim ".to_string(),
+        _ => {
+            if let Some(name) = reverse_named_op(v) {
+                format!("\\{name} ")
+            } else {
+                v.to_string()
+            }
+        }
+    }
+}
+
+fn reverse_greek(sym: &str) -> Option<&'static str> {
+    Some(match sym {
+        "α" => "alpha", "β" => "beta", "γ" => "gamma", "δ" => "delta",
+        "ε" => "epsilon", "θ" => "theta", "λ" => "lambda", "μ" => "mu",
+        "π" => "pi", "σ" => "sigma", "φ" => "phi", "ω" => "omega",
+        "Γ" => "Gamma", "Δ" => "Delta", "Θ" => "Theta", "Λ" => "Lambda",
+        "Σ" => "Sigma", "Φ" => "Phi", "Ω" => "Omega",
+        _ => return None,
+    })
+}
+
+/// `named_op()` の逆引き。複数コマンドが同じ記号にマップされる場合(`leq`/`le` 等)は
+/// 短い正式名を代表として選ぶ(round-trip の構造同値には影響しない — どちらで
+/// 書き戻しても再パース結果の `Op { v: "≤" }` は同じ)。
+fn reverse_named_op(sym: &str) -> Option<&'static str> {
+    Some(match sym {
+        "×" => "times", "⋅" => "cdot", "÷" => "div", "±" => "pm",
+        "≤" => "leq", "≥" => "geq", "≠" => "neq",
+        "≈" => "approx", "→" => "to", "∞" => "infty",
+        "∂" => "partial", "∇" => "nabla", "∈" => "in",
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +727,102 @@ mod tests {
                 body: Box::new(MathNode::Row { items: vec![ident("a"), op("+"), ident("b")] }),
             }
         );
+    }
+
+    // --- WP-M1(D38): to_tex round-trip ------------------------------------------
+    //
+    // `parse(to_tex(parse(s))) == parse(s)`(構造同値、文字列の完全一致は求めない)。
+    // §6 の対応コマンド全種を1件ずつ、素の `parse`(非正規化)で確認する。
+
+    fn assert_roundtrips(tex: &str) {
+        let original = parse(tex).unwrap_or_else(|e| panic!("precondition parse({tex:?}) failed: {e:?}"));
+        let rewritten = to_tex(&original);
+        let reparsed = parse(&rewritten)
+            .unwrap_or_else(|e| panic!("to_tex({tex:?}) -> {rewritten:?} failed to reparse: {e:?}"));
+        assert_eq!(original, reparsed, "round-trip mismatch for {tex:?} (to_tex: {rewritten:?})");
+    }
+
+    #[test]
+    fn roundtrip_ident_and_num() {
+        assert_roundtrips("x");
+        assert_roundtrips("314");
+    }
+
+    #[test]
+    fn roundtrip_frac() {
+        assert_roundtrips(r"\frac{a}{b}");
+        assert_roundtrips(r"\frac{1}{\frac{a}{b}}");
+    }
+
+    #[test]
+    fn roundtrip_sub_sup_subsup() {
+        assert_roundtrips("x^2");
+        assert_roundtrips("x_{ij}");
+        assert_roundtrips("x_i^2");
+    }
+
+    #[test]
+    fn roundtrip_sqrt_and_root() {
+        assert_roundtrips(r"\sqrt{2}");
+        assert_roundtrips(r"\sqrt[3]{x}");
+    }
+
+    #[test]
+    fn roundtrip_big_operators_and_normalize() {
+        assert_roundtrips(r"\sum_{i=1}^{n} x_i");
+        assert_roundtrips(r"\prod_{i=1}^{n} x_i");
+        assert_roundtrips(r"\int_{0}^{1} x");
+
+        // normalize() 後(UnderOver 形)でも構造同値を保つこと。
+        let original = parse_normalized(r"\sum_{i=1}^{n} x_i").unwrap();
+        let rewritten = to_tex(&original);
+        let reparsed = parse_normalized(&rewritten).unwrap();
+        assert_eq!(original, reparsed);
+    }
+
+    #[test]
+    fn roundtrip_text() {
+        assert_roundtrips(r"\text{hello}");
+    }
+
+    #[test]
+    fn roundtrip_left_right() {
+        assert_roundtrips(r"\left( a + b \right)");
+        assert_roundtrips(r"\left[ x \right]");
+    }
+
+    #[test]
+    fn roundtrip_greek_letters() {
+        for name in ["alpha", "beta", "gamma", "delta", "theta", "lambda", "mu", "pi", "sigma", "phi", "omega"] {
+            assert_roundtrips(&format!(r"\{name}"));
+        }
+        for name in ["Gamma", "Delta", "Theta", "Lambda", "Sigma", "Phi", "Omega"] {
+            assert_roundtrips(&format!(r"\{name}"));
+        }
+    }
+
+    #[test]
+    fn roundtrip_named_ops() {
+        for name in ["times", "cdot", "div", "pm", "leq", "geq", "neq", "approx", "to", "infty", "partial", "nabla", "in"] {
+            assert_roundtrips(&format!(r"a \{name} b"));
+        }
+    }
+
+    #[test]
+    fn roundtrip_hat_accent() {
+        assert_roundtrips(r"\hat{y}");
+        assert_roundtrips(r"\hat{y}_i");
+    }
+
+    #[test]
+    fn roundtrip_quadratic_formula() {
+        assert_roundtrips(r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}");
+    }
+
+    #[test]
+    fn roundtrip_loss_formula_from_fixture() {
+        // docs/sml_example_formatted.sml の ::math ブロックと同じ式(D38 ドッグ
+        // フーディングで実際に描画される式そのもので固定する)。
+        assert_roundtrips(r"L = \frac{1}{N} \sum_{i=1}^{N} (y_i - \hat{y}_i)^2");
     }
 }

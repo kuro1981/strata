@@ -7,6 +7,7 @@ edition = "2024"
 strata-sml = { path = "../strata-sml" }
 strata-build = { path = "../strata-build" }
 strata-typst = { path = "../strata-typst" }
+strata-md = { path = "../strata-md" }
 strata-view = { path = "../strata-view" }
 strata-context = { path = "../strata-context" }
 clap = { version = "4", features = ["derive"] }

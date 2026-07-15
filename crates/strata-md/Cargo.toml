@@ -1,0 +1,14 @@
+[package]
+name = "strata-md"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strata-core = { path = "../strata-core" }
+tex2math = { path = "../tex2math" }
+
+[dev-dependencies]
+# ゴールデン契約テスト・round-trip 受け入れテスト(build → render → fmt → build)専用。
+# ライブラリ本体は strata-core/tex2math のみに依存する(strata-typst と同じ流儀)。
+strata-build = { path = "../strata-build" }
+strata-sml = { path = "../strata-sml" }

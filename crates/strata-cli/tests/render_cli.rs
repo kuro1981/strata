@@ -177,6 +177,99 @@ id: 01J2T8Z1000000000000000000
     assert!(err.contains("HiddenRef"), "stderr: {err}");
 }
 
+// ---- D38(md-render-handoff.md WP-M3): `render --format md` -----------------------
+
+fn golden_md() -> String {
+    let path = repo_root().join("docs/sml_example_formatted.md");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("golden fixture missing at {}: {e}", path.display()))
+}
+
+/// `--format md` は既定(typst)と別の内容を出し、`docs/sml_example_formatted.md`
+/// と完全一致する(strata-md のゴールデン契約テストと同じ成果物を CLI 経由でも固定)。
+#[test]
+fn render_format_md_matches_golden_md() {
+    let tmp = TempDir::new("render-format-md");
+    let file = copy_formatted_to(&tmp);
+
+    let out = run(&["render", "--format", "md", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), golden_md());
+}
+
+/// `--format` を省略すると既定(typst)のまま(D19 改定の非退行)。
+#[test]
+fn render_without_format_flag_still_defaults_to_typst() {
+    let tmp = TempDir::new("render-format-default");
+    let file = copy_formatted_to(&tmp);
+
+    let out = run(&["render", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+    assert_eq!(stdout_str(&out), golden_typ());
+}
+
+/// D38: `{#ULID}` タグ・alias は MD 出力に一切出さない(context との役割分担)。
+#[test]
+fn render_format_md_never_emits_ulid_tags() {
+    let tmp = TempDir::new("render-format-md-no-ulid");
+    let file = copy_formatted_to(&tmp);
+
+    let out = run(&["render", "--format", "md", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(!text.contains("{#"), "{text}");
+    assert!(!text.contains("01J2T8"), "{text}");
+}
+
+/// `--format md` でも `--hide` は typst と同じ挙動(サブツリー非描画+HiddenRef 警告)。
+#[test]
+fn render_format_md_hide_removes_classed_subtree_and_warns_on_dangling_ref() {
+    let tmp = TempDir::new("render-format-md-hide");
+    let file = tmp.path().join("doc.sml");
+    let src = "\
+---
+id: 01J2T8Z1000000000000000000
+---
+
+# 職務経歴 {#01J2T8Z2000000000000000000}
+
+[id=01J2T8Z3000000000000000000, class=note]
+【補足】これは面接用のメモで実名を含む。
+
+[id=01J2T8Z4000000000000000000, supports=01J2T8Z3000000000000000000]
+詳細は[こちら](ref:01J2T8Z3000000000000000000)を参照。
+";
+    std::fs::write(&file, src).unwrap();
+
+    let check = run(&["render", "--format", "md", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&check), 0, "stderr: {}", stderr_str(&check));
+    assert!(stdout_str(&check).contains("【補足】"));
+
+    let hidden = run(&["render", "--format", "md", "--hide", "note", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&hidden), 0, "stderr: {}", stderr_str(&hidden));
+    let out = stdout_str(&hidden);
+    assert!(!out.contains("【補足】"), "{out}");
+    assert!(out.contains("こちら"), "text 表示は残る: {out}");
+    let err = stderr_str(&hidden);
+    assert!(err.contains("warning"), "stderr: {err}");
+    assert!(err.contains("HiddenRef"), "stderr: {err}");
+}
+
+/// `-o` 指定時も MD テキストが原子的に書き込まれる(拡張子はユーザー指定のまま、
+/// 自動推測しない)。
+#[test]
+fn render_format_md_dash_o_writes_file_atomically_and_matches_golden() {
+    let tmp = TempDir::new("render-format-md-dash-o");
+    let file = copy_formatted_to(&tmp);
+    let out_path = tmp.path().join("out.md");
+
+    let out = run(&["render", "--format", "md", file.to_str().unwrap(), "-o", out_path.to_str().unwrap()]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+    assert!(stdout_str(&out).is_empty(), "with -o, Markdown source goes to the file, not stdout");
+
+    let written = std::fs::read_to_string(&out_path).expect("output file must exist");
+    assert_eq!(written, golden_md());
+}
+
 /// 既存フローの退行がないこと: `render` 追加後も `fmt` / `build` サブコマンドが
 /// 動作すること。
 #[test]
