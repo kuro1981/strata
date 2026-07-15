@@ -123,7 +123,7 @@ fn check_unknown_attr_keys(attrs: &Option<AttrLine>, diags: &mut Vec<Diag>) {
             diags.push(Diag::new(
                 DiagKind::UnknownAttrKey,
                 *span,
-                format!("属性キー '{key}' は既知のキー(supports/depends-on/cites/id/alias)ではありません(タイポの可能性。エッジは張られません)"),
+                format!("属性キー '{key}' は既知のキー(supports/depends-on/cites/id/alias/class)ではありません(タイポの可能性。エッジは張られません)"),
             ));
         }
     }
