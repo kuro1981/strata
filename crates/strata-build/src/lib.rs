@@ -16,8 +16,10 @@ mod list_child;
 mod math;
 mod resolve;
 mod term;
+mod workspace;
 
 pub use error::BuildError;
+pub use workspace::{build_workspace, DocRoot, FileDiag, Member, WorkspaceBuildOutput, WorkspaceError};
 
 use serde::{Deserialize, Serialize};
 use strata_core::{Graph, NodeId};
@@ -50,19 +52,23 @@ pub fn build(src: &str) -> Result<BuildOutput, Vec<BuildError>> {
     let mut errors: Vec<BuildError> = parse_errors.into_iter().map(BuildError::Parse).collect();
 
     let registry = resolve::build_registry(&parsed.doc, &mut errors);
-    let (graph, root, pass2_errors) = convert::run(src, &parsed.doc, registry);
+    let mut shared = convert::SharedState::new();
+    // 単一ファイル build には cross_doc index が無い(`None`)。doc 修飾参照
+    // (`<文書alias>/<ブロックalias>`)に遭遇すると `BuildError::CrossDocRef` になる
+    // (WP-W1.3、`--workspace` の必要性を案内)。
+    let (root, pass2_errors) = convert::run(src, &parsed.doc, registry, &mut shared, None);
     errors.extend(pass2_errors);
 
     if !errors.is_empty() {
         return Err(errors);
     }
 
-    let violations = strata_core::invariants::validate(&graph);
+    let violations = strata_core::invariants::validate(&shared.graph);
     if !violations.is_empty() {
         return Err(violations.into_iter().map(BuildError::Invariant).collect());
     }
 
-    Ok(BuildOutput { graph, root, warnings })
+    Ok(BuildOutput { graph: shared.graph, root, warnings })
 }
 
 #[cfg(test)]

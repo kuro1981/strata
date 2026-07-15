@@ -11,7 +11,7 @@
 //! (sml-spec 「既知の注意点」)。
 
 use crate::ast::{CellRaw, DateRaw};
-use crate::block::parse_ref_target;
+use crate::block::parse_scoped_ref_target;
 use crate::error::{Diag, DiagKind};
 use crate::span::Span;
 
@@ -48,7 +48,7 @@ pub fn parse_typed_value(raw: &str, date_format: Option<DateFormat>, span: Span,
         return CellRaw::Text(s[1..s.len() - 1].to_string());
     }
     if let Some(target) = s.strip_prefix("ref:") {
-        return CellRaw::Ref(parse_ref_target(target.trim()));
+        return CellRaw::Ref(parse_scoped_ref_target(target.trim()));
     }
 
     if let Some(period) = try_period(s, date_format, span, diags) {

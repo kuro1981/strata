@@ -18,7 +18,7 @@ pub use def::ViewDef;
 pub use manifest::Manifest;
 pub use value::YValue;
 
-use strata_build::BuildOutput;
+use strata_build::{BuildOutput, WorkspaceBuildOutput};
 
 /// 1つの出力ファイル(-o 起点の相対パス + 決定的にシリアライズされた YAML テキスト)。
 #[derive(Debug, Clone, PartialEq)]
@@ -43,13 +43,30 @@ pub fn parse_manifest(src: &str) -> Result<Manifest, String> {
 ///
 /// 戻り値は (出力ファイル列(path 昇順で決定的), 警告メッセージ列)。
 pub fn apply(build: &BuildOutput, view: &ViewDef, profile: Option<&str>) -> Result<(Vec<OutputFile>, Vec<String>), String> {
+    apply_with_ctx(&eval::EvalContext::new(&build.graph), view, profile)
+}
+
+/// `apply` のワークスペース版(WP-W3)。セレクタの doc スコープ(`{ alias, doc }`)を
+/// 解決できる `EvalContext::new_workspace` を使う以外は `apply` と同じ。
+pub fn apply_workspace(
+    ws: &WorkspaceBuildOutput,
+    view: &ViewDef,
+    profile: Option<&str>,
+) -> Result<(Vec<OutputFile>, Vec<String>), String> {
+    apply_with_ctx(&eval::EvalContext::new_workspace(&ws.graph, &ws.doc_aliases), view, profile)
+}
+
+fn apply_with_ctx(
+    ctx: &eval::EvalContext,
+    view: &ViewDef,
+    profile: Option<&str>,
+) -> Result<(Vec<OutputFile>, Vec<String>), String> {
     if let Some(p) = profile
         && !view.profiles.iter().any(|x| x == p)
     {
         return Err(format!("未宣言の profile '{p}' です(宣言済み: {:?})", view.profiles));
     }
 
-    let ctx = eval::EvalContext::new(&build.graph);
     let mut outputs = Vec::new();
     for f in &view.files {
         if let Some(p) = profile
@@ -59,16 +76,21 @@ pub fn apply(build: &BuildOutput, view: &ViewDef, profile: Option<&str>) -> Resu
             continue;
         }
         let scope = eval::Scope::default();
-        let value = eval::eval(&ctx, &scope, &f.content).map_err(|e| format!("{}: {e}", f.path))?;
+        let value = eval::eval(ctx, &scope, &f.content).map_err(|e| format!("{}: {e}", f.path))?;
         let yaml = value::to_yaml_string(&value).map_err(|e| format!("{}: YAML シリアライズ失敗: {e}", f.path))?;
         outputs.push(OutputFile { path: f.path.clone(), yaml });
     }
     outputs.sort_by(|a, b| a.path.cmp(&b.path));
-    let warnings = ctx.warnings.into_inner();
+    let warnings = ctx.warnings.borrow().clone();
     Ok((outputs, warnings))
 }
 
 /// dry-run 検証(D33)。
 pub fn check(build: &BuildOutput, view: &ViewDef, manifest: &Manifest) -> CheckReport {
     check::check(build, view, manifest)
+}
+
+/// `check` のワークスペース版(WP-W3)。
+pub fn check_workspace(ws: &WorkspaceBuildOutput, view: &ViewDef, manifest: &Manifest) -> CheckReport {
+    check::check_workspace(ws, view, manifest)
 }

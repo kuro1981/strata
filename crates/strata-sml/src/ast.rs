@@ -51,6 +51,11 @@ pub struct Frontmatter {
     pub id: Option<(RefTarget, Span)>,
     /// `title: <値>` の生文字列。キーが無ければ `None`。
     pub title: Option<String>,
+    /// `alias: <値>` の生文字列とその値トークンのスパン(D41、sml-spec §2.1)。
+    /// 文書エイリアス — ワークスペース横断参照 `ref:<文書alias>/<...>` の左辺になる。
+    /// キーが無ければ `None`。字句は他の alias と同じ `[A-Za-z0-9_-]+`
+    /// (不正なら `BadKeyCharset`)。
+    pub alias: Option<(String, Span)>,
     /// 閉じ `---` 単独行の内容スパン(改行を含まない)。ファイル末尾まで閉じが
     /// 見つからなかった場合はファイル末尾の空スパン(`UnclosedFrontmatter` と併発)。
     pub close_span: Span,
@@ -171,6 +176,15 @@ pub enum AttrValue {
 pub enum RefTarget {
     Ulid(Ulid),
     Label(String),
+    /// ワークスペース横断参照(D41/D42、sml-spec §1.10): `<文書alias>/<ブロックalias>`。
+    /// `doc` は参照先文書の frontmatter alias、`alias` はその文書内のブロック alias
+    /// (無修飾の alias と同じ字句・同じ解決規則で、文書をまたぐだけ)。
+    /// **id タグ(宣言側)・フロントマターの `id:` では決して生成されない** — この
+    /// variant を作るのは参照側のパーサ(inline.rs の `resolve_target` /
+    /// value.rs 経由の `block::parse_scoped_ref_target`)だけ。単一ファイル build
+    /// (`--workspace` 無し)でこの variant に遭遇したら `BuildError::CrossDocRef`
+    /// (専用の案内メッセージ)を返す(WP-W1.3)。
+    DocLabel { doc: String, alias: String },
 }
 
 // ---- インライン --------------------------------------------------------------

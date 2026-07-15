@@ -20,7 +20,9 @@
 //!
 //! スキーム別の target 字句規則:
 //!   - `ref` / `table` / `fig` / `math` / `cell` の target: ULID(26字 Crockford)なら
-//!     `RefTarget::Ulid`、そうでなければ `RefTarget::Label` だが `[A-Za-z0-9_-]+` の
+//!     `RefTarget::Ulid`、`<文書alias>/<ブロックalias>`(D41/D42、sml-spec §1.10)の
+//!     形なら `RefTarget::DocLabel`(`/` は alias 字句に含まれないため曖昧さ無く分割
+//!     できる)、そうでなければ `RefTarget::Label` だが `[A-Za-z0-9_-]+` の
 //!     字句検証を行い、違反すれば `BadKeyCharset` を積む(ノード自体は構築する。
 //!     block.rs の alias 検証と同じ「診断は積むが止めない」方針)
 //!   - `term` の target のみ字句制限の対象外(日本語等の任意の非空文字列を許す)
@@ -463,6 +465,23 @@ pub(crate) fn normalize_label(s: &str) -> String {
 fn resolve_target(text: &str, span: Span, diags: &mut Vec<Diag>) -> RefTarget {
     if let Ok(u) = text.parse::<Ulid>() {
         return RefTarget::Ulid(u);
+    }
+    // D41/D42: `<文書alias>/<ブロックalias>` の doc 修飾参照。`/` は alias 字句
+    // (`[A-Za-z0-9_-]+`)に含まれないため、最初(かつ唯一許される)の `/` で
+    // 安全に分割できる。2個目以降の `/` があれば字句違反として通常の Label 経路へ
+    // フォールバックする(BadKeyCharset)。
+    if let Some((doc, alias)) = text.split_once('/') {
+        if !doc.is_empty() && !alias.is_empty() && !alias.contains('/') && is_valid_key_charset(doc) && is_valid_key_charset(alias) {
+            return RefTarget::DocLabel { doc: doc.to_string(), alias: alias.to_string() };
+        }
+        diags.push(Diag::new(
+            DiagKind::BadKeyCharset,
+            span,
+            format!(
+                "参照ターゲット '{text}' の字句が不正です(<文書alias>/<ブロックalias> または [A-Za-z0-9_-]+ のみ許可)"
+            ),
+        ));
+        return RefTarget::Label(text.to_string());
     }
     if !is_valid_key_charset(text) {
         diags.push(Diag::new(

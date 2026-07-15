@@ -29,6 +29,17 @@ pub enum BuildError {
     /// build の成否は class の有無に依存しない設計だが、字句だけは検証する
     /// (`WP-X1` の実装ハンドオフ: 「class を検証(字句違反は BuildError)」)。
     BadClass { span: Span, msg: String },
+    /// 単一ファイル build(`--workspace` 無し)で doc 修飾参照
+    /// (`<文書alias>/<ブロックalias>`、D41/D42)に遭遇した(WP-W1.3、
+    /// sml-spec §1.10)。黙って落とさず、`--workspace` の必要性を案内する専用エラー。
+    CrossDocRef { doc: String, alias: String, span: Span },
+    /// ワークスペース build(`--workspace`)で doc 修飾参照の文書 alias 側が
+    /// どのメンバーにも見つからない(WP-W2.3: 「doc 修飾の未解決(文書 alias 不明 /
+    /// ブロック alias 不明を区別)」の前者)。
+    UnknownDocAlias { doc: String, alias: String, span: Span },
+    /// ワークスペース build で doc 修飾参照の文書 alias 側は解決できたが、その文書内に
+    /// 該当ブロック alias が無い(WP-W2.3 の後者)。
+    UnknownBlockAlias { doc: String, alias: String, span: Span },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
     /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。

@@ -92,6 +92,10 @@ pub enum RawSelector {
 pub struct RawSelectorFields {
     #[serde(default)]
     pub alias: Option<String>,
+    /// WP-W3(D43): `alias:` とだけ組み合わせられる文書スコープ修飾。
+    /// `{ alias: licenses, doc: resume }`(ワークスペースモード専用)。
+    #[serde(default)]
+    pub doc: Option<String>,
     #[serde(default)]
     pub class: Option<String>,
     #[serde(default, rename = "heading-text")]
@@ -152,6 +156,12 @@ impl RawSelector {
 
 impl RawSelectorFields {
     fn into_ast(self) -> DefResult<Selector> {
+        // WP-W3: `doc:` は `alias:` の修飾子であり、それ単独では意味を持たない
+        // (`class`/`cell` 等と同時に指定された場合も誤用として弾く)。
+        if self.doc.is_some() && self.alias.is_none() {
+            return Err("`doc:` は `alias:` と組み合わせてのみ指定できます".to_string());
+        }
+        let doc = self.doc;
         let mut count = 0;
         let mut result = None;
         macro_rules! take {
@@ -162,7 +172,7 @@ impl RawSelectorFields {
                 }
             };
         }
-        take!(self.alias, |v: String| -> DefResult<Selector> { Ok(Selector::Alias(v)) });
+        take!(self.alias, |v: String| -> DefResult<Selector> { Ok(Selector::Alias { alias: v, doc }) });
         take!(self.class, |v: String| -> DefResult<Selector> { Ok(Selector::Class(v)) });
         take!(self.heading_text, |v: String| -> DefResult<Selector> {
             Ok(Selector::HeadingText(v))
@@ -270,10 +280,21 @@ impl RawCombinator {
 /// `self` のような bare キーワードをここに書いた場合など)なので明示的なエラーに
 /// する — セレクタの `self` キーワードとは別物であることをエラーメッセージでも
 /// 明確にする。
+///
+/// WP-W3(D43): 先頭に `<文書alias>/` を付けた `doc/alias.キー` も受理する
+/// (ワークスペースモード専用の doc スコープ修飾。SML 側の `<文書alias>/<ブロック
+/// alias>` と対称の拡張、裁量)。`/` も alias 字句に出ないため、最初の `/` で
+/// 安全に分割できる(`.` の分割と衝突しない — doc/alias 双方とも key 字句)。
 fn parse_pick_sugar(s: &str) -> DefResult<Combinator> {
-    let (alias, key) = s.trim().split_once('.').ok_or_else(|| {
+    let s = s.trim();
+    let (doc, rest) = match s.split_once('/') {
+        Some((d, r)) if !d.is_empty() => (Some(d.to_string()), r),
+        _ => (None, s),
+    };
+    let (alias, key) = rest.split_once('.').ok_or_else(|| {
         format!(
-            "裸文字列 '{s}' は 'alias.キー' の形式である必要があります(record フィールド抽出の糖衣、D35)。\
+            "裸文字列 '{s}' は 'alias.キー'(または 'doc/alias.キー')の形式である必要があります\
+             (record フィールド抽出の糖衣、D35/WP-W3)。\
              セレクタの `self` はここでは使えません — フルの `{{ pick: {{ of: self }} }}` を書いてください"
         )
     })?;
@@ -281,7 +302,10 @@ fn parse_pick_sugar(s: &str) -> DefResult<Combinator> {
         return Err(format!("裸文字列 '{s}' の alias またはキーが空です"));
     }
     Ok(Combinator::Pick {
-        of: Selector::RecordField { of: Box::new(Selector::Alias(alias.to_string())), key: key.to_string() },
+        of: Selector::RecordField {
+            of: Box::new(Selector::Alias { alias: alias.to_string(), doc }),
+            key: key.to_string(),
+        },
         as_type: AsType::Text,
     })
 }

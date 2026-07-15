@@ -21,29 +21,56 @@ use strata_core::CellCoord as CoreCellCoord;
 use ulid::Ulid;
 
 use crate::error::BuildError;
-use crate::resolve::{NodeKindTag, Registration, Registry};
+use crate::resolve::{CrossDocIndex, NodeKindTag, Registration, Registry};
 use crate::{list_child, math, term};
 
 struct Builder<'a> {
     src: &'a str,
     reg: Registry,
-    graph: Graph,
-    term_ids: HashMap<String, NodeId>,
+    graph: &'a mut Graph,
+    term_ids: &'a mut HashMap<String, NodeId>,
     errors: Vec<BuildError>,
-    ord: HashMap<NodeId, u32>,
+    ord: &'a mut HashMap<NodeId, u32>,
     /// M6(D40): 水平線ノードの決定的 ID 導出用の出現カウンタ(裁量、最終報告参照)。
     hr_count: u32,
+    /// D42: ワークスペース横断参照の解決 index。単一ファイル build では `None`
+    /// (doc 修飾参照に遭遇したら `CrossDocRef` を返す、WP-W1.3)。
+    cross_doc: Option<&'a CrossDocIndex>,
 }
 
-pub(crate) fn run(src: &str, doc: &SmlDocument, reg: Registry) -> (Graph, Option<NodeId>, Vec<BuildError>) {
+/// Pass 2 が複数ファイルにまたがって共有する可変状態(WP-W2: ワークスペース統合)。
+/// 単一ファイル build は使い捨ての1組を渡すだけで、従来と完全に同じ挙動になる。
+/// `graph`/`term_ids`/`ord` を複数回の `run` 呼び出しにまたがって共有することで、
+/// Term ノードの自然合流(D9)・複数文書ぶんの `contains` 順序カウンタが1つの
+/// グラフへ正しく積み上がる(WP-W2.4)。
+pub(crate) struct SharedState {
+    pub graph: Graph,
+    pub term_ids: HashMap<String, NodeId>,
+    pub ord: HashMap<NodeId, u32>,
+}
+
+impl SharedState {
+    pub(crate) fn new() -> Self {
+        SharedState { graph: Graph::default(), term_ids: HashMap::new(), ord: HashMap::new() }
+    }
+}
+
+pub(crate) fn run(
+    src: &str,
+    doc: &SmlDocument,
+    reg: Registry,
+    shared: &mut SharedState,
+    cross_doc: Option<&CrossDocIndex>,
+) -> (Option<NodeId>, Vec<BuildError>) {
     let mut b = Builder {
         src,
         reg,
-        graph: Graph::default(),
-        term_ids: HashMap::new(),
+        graph: &mut shared.graph,
+        term_ids: &mut shared.term_ids,
         errors: Vec::new(),
-        ord: HashMap::new(),
+        ord: &mut shared.ord,
         hr_count: 0,
+        cross_doc,
     };
 
     let root = b.reg.document_id;
@@ -67,7 +94,7 @@ pub(crate) fn run(src: &str, doc: &SmlDocument, reg: Registry) -> (Graph, Option
         }
     }
 
-    (b.graph, root, b.errors)
+    (root, b.errors)
 }
 
 fn current_parent(stack: &[(u8, NodeId)], root: Option<NodeId>) -> Option<NodeId> {
@@ -316,7 +343,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// `ULID / エイリアス / term:<用語名>` トークンを解決する(属性行の値用)。
+    /// `ULID / エイリアス / <文書alias>/<ブロックalias> / term:<用語名>` トークンを
+    /// 解決する(属性行の値用: supports=/depends-on=/cites=)。属性値は strata-sml 層
+    /// では単なる自由文字列(字句検証は行われない、WP-W1 裁量)なので、doc 修飾の
+    /// 検出(`/` 分割)はここで行う。
     fn resolve_attr_target(&mut self, token: &str, span: Span) -> NodeId {
         if let Some(rest) = token.strip_prefix("term:") {
             if let Ok(u) = rest.parse::<Ulid>() {
@@ -327,6 +357,13 @@ impl<'a> Builder<'a> {
         if let Ok(u) = token.parse::<Ulid>() {
             return NodeId(u);
         }
+        if let Some((doc, alias)) = token.split_once('/')
+            && !doc.is_empty()
+            && !alias.is_empty()
+            && !alias.contains('/')
+        {
+            return self.resolve_cross_doc(doc, alias, span);
+        }
         if let Some(&id) = self.reg.alias_table.get(token) {
             return id;
         }
@@ -335,7 +372,8 @@ impl<'a> Builder<'a> {
     }
 
     /// `RefTarget`(インライン参照・セル参照)の解決。ULID ならそのまま、ラベルなら
-    /// alias 表を引く(2パス方式の第2パス、sml-build-m3-handoff.md D-B5)。
+    /// alias 表を引く(2パス方式の第2パス、sml-build-m3-handoff.md D-B5)。doc 修飾
+    /// (D42)は `cross_doc` index の有無で分岐する(WP-W1.3/WP-W2.3)。
     fn resolve_ref_target(&mut self, target: &RefTarget, span: Span) -> NodeId {
         match target {
             RefTarget::Ulid(u) => NodeId(*u),
@@ -347,7 +385,29 @@ impl<'a> Builder<'a> {
                     NodeId::new()
                 }
             }
+            RefTarget::DocLabel { doc, alias } => self.resolve_cross_doc(doc, alias, span),
         }
+    }
+
+    /// doc 修飾参照(`<文書alias>/<ブロックalias>`)の共通解決ロジック。
+    /// - `cross_doc: None`(単一ファイル build、`--workspace` 無し)→ `CrossDocRef`
+    ///   (黙って落とさず `--workspace` の必要性を案内する、WP-W1.3)
+    /// - `cross_doc: Some(idx)` かつ `doc` が未知 → `UnknownDocAlias`
+    /// - `doc` は既知だが `alias` がその文書内に無い → `UnknownBlockAlias`
+    fn resolve_cross_doc(&mut self, doc: &str, alias: &str, span: Span) -> NodeId {
+        let Some(idx) = self.cross_doc else {
+            self.errors.push(BuildError::CrossDocRef { doc: doc.to_string(), alias: alias.to_string(), span });
+            return NodeId::new();
+        };
+        let Some(doc_table) = idx.get(doc) else {
+            self.errors.push(BuildError::UnknownDocAlias { doc: doc.to_string(), alias: alias.to_string(), span });
+            return NodeId::new();
+        };
+        let Some(&id) = doc_table.get(alias) else {
+            self.errors.push(BuildError::UnknownBlockAlias { doc: doc.to_string(), alias: alias.to_string(), span });
+            return NodeId::new();
+        };
+        id
     }
 
     fn term_id(&mut self, name: &str) -> NodeId {
@@ -424,6 +484,10 @@ impl<'a> Builder<'a> {
                 let to = match name_or_id {
                     RefTarget::Ulid(u) => NodeId(*u),
                     RefTarget::Label(name) => self.term_id(name),
+                    // `term:` の target は doc 修飾の対象外(D42 は ref:/table:/fig:/math:/
+                    // cell: のみを挙げている)。inline.rs の term: パースは常に Ulid/Label
+                    // しか生成しないため、ここには到達しない(防御的に用語名として扱う)。
+                    RefTarget::DocLabel { doc, alias } => self.term_id(&format!("{doc}/{alias}")),
                 };
                 self.graph.link(from, Rel::TermRef, to, None);
                 Inline::Term { to, text: text_str }

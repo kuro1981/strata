@@ -11,8 +11,28 @@ use strata_core::{CellValue, DateValue, Graph, Node, NodeId, NodePayload};
 
 pub struct EvalContext<'g> {
     pub graph: &'g Graph,
+    /// 無修飾 alias の解決表。単一文書モードでは全ノードの alias をそのまま
+    /// フラットに写す(従来どおり — 1文書内では build 時点で alias 一意性が
+    /// 保証済み)。ワークスペースモード(`new_workspace`)では**ワークスペース全体で
+    /// 一意な alias だけ**を載せる(WP-W3: 複数文書が同名の alias を持つのは
+    /// 正当 — D42「無修飾 alias = 同一文書」— なので、フラットな1個のグローバル
+    /// 表に押し込めない alias は `ambiguous` 側へ回す)。
     alias_index: HashMap<&'g str, NodeId>,
+    /// ワークスペースモードで、複数文書にまたがって定義されている alias 名
+    /// (無修飾では解決できない — `doc:` で明示するよう案内する)。単一文書モードでは
+    /// 常に空。
+    ambiguous: HashSet<&'g str>,
+    /// ワークスペースモード専用: 文書 alias → (ブロック alias → NodeId)。
+    /// `strata_build::WorkspaceBuildOutput::doc_aliases` をそのまま借用する
+    /// (WP-W3: `{ alias: X, doc: Y }` の解決に使う)。単一文書モードでは `None`。
+    doc_alias_index: Option<&'g BTreeMap<String, BTreeMap<String, NodeId>>>,
     pub touched: std::cell::RefCell<HashSet<NodeId>>,
+    /// `touched` の部分集合: `{ alias: X, doc: Y }` の明示的な doc 修飾で解決した
+    /// ノード(WP-W3)。`check_workspace` の「未使用ノード」走査(WP-W4 で追加)が、
+    /// 「1フィールドだけ doc: で借りてきた文書」を、その文書全体が使われた
+    /// ことにして丸ごとスキャン対象へ広げてしまわないようにするための印
+    /// (crate::check のドキュメント参照)。単一文書モードでは常に空。
+    pub doc_qualified_touched: std::cell::RefCell<HashSet<NodeId>>,
     pub warnings: std::cell::RefCell<Vec<String>>,
 }
 
@@ -27,7 +47,38 @@ impl<'g> EvalContext<'g> {
         EvalContext {
             graph,
             alias_index,
+            ambiguous: HashSet::new(),
+            doc_alias_index: None,
             touched: std::cell::RefCell::new(HashSet::new()),
+            doc_qualified_touched: std::cell::RefCell::new(HashSet::new()),
+            warnings: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// ワークスペースモード用のコンストラクタ(WP-W3)。`doc_aliases` は
+    /// `strata_build::build_workspace` が返す文書 alias → ブロック alias 表
+    /// (`WorkspaceBuildOutput::doc_aliases`)。無修飾 alias の解決規則は
+    /// 「ワークスペース全体で一意なら解決・複数文書にまたがれば `doc:` を要求する
+    /// エラー」(裁量、docs/view-def-v1.md 参照)。
+    pub fn new_workspace(graph: &'g Graph, doc_aliases: &'g BTreeMap<String, BTreeMap<String, NodeId>>) -> Self {
+        let mut counts: HashMap<&str, u32> = HashMap::new();
+        let mut first: HashMap<&str, NodeId> = HashMap::new();
+        for (id, node) in &graph.nodes {
+            if let Some(a) = &node.alias {
+                *counts.entry(a.as_str()).or_insert(0) += 1;
+                first.entry(a.as_str()).or_insert(*id);
+            }
+        }
+        let alias_index: HashMap<&str, NodeId> =
+            first.into_iter().filter(|(a, _)| counts[a] == 1).collect();
+        let ambiguous: HashSet<&str> = counts.into_iter().filter(|(_, c)| *c > 1).map(|(a, _)| a).collect();
+        EvalContext {
+            graph,
+            alias_index,
+            ambiguous,
+            doc_alias_index: Some(doc_aliases),
+            touched: std::cell::RefCell::new(HashSet::new()),
+            doc_qualified_touched: std::cell::RefCell::new(HashSet::new()),
             warnings: std::cell::RefCell::new(Vec::new()),
         }
     }
@@ -38,6 +89,13 @@ impl<'g> EvalContext<'g> {
 
     fn mark(&self, id: NodeId) {
         self.touched.borrow_mut().insert(id);
+    }
+
+    /// `mark` に加え、`doc_qualified_touched` にも記録する(WP-W3 の `doc:` 修飾
+    /// alias セレクタ専用)。
+    fn mark_doc_qualified(&self, id: NodeId) {
+        self.touched.borrow_mut().insert(id);
+        self.doc_qualified_touched.borrow_mut().insert(id);
     }
 
     fn warn(&self, msg: String) {
@@ -65,7 +123,29 @@ pub type EvalResult<T> = Result<T, String>;
 
 pub fn resolve_selector(ctx: &EvalContext, scope: &Scope, sel: &Selector) -> EvalResult<Resolved> {
     match sel {
-        Selector::Alias(name) => {
+        // WP-W3(D43): `doc` が指定されていれば文書スコープ修飾解決(ワークスペース
+        // モード専用)。無指定なら従来どおりの無修飾解決(単一文書モードはそのまま、
+        // ワークスペースモードは「全体で一意なら解決・複数文書にまたがれば
+        // エラー」— `new_workspace` が事前に計算した `ambiguous` を見る)。
+        Selector::Alias { alias: name, doc: Some(d) } => {
+            let idx = ctx.doc_alias_index.ok_or_else(|| {
+                format!("alias '{name}' に doc: '{d}' が指定されていますが、ワークスペースモードではありません(`--workspace` を使ってください)")
+            })?;
+            let doc_table = idx
+                .get(d.as_str())
+                .ok_or_else(|| format!("doc '{d}' が見つかりません(ワークスペースに frontmatter alias '{d}' を持つ文書がありません)"))?;
+            let id = *doc_table
+                .get(name.as_str())
+                .ok_or_else(|| format!("文書 '{d}' に alias '{name}' が見つかりません"))?;
+            ctx.mark_doc_qualified(id);
+            Ok(Resolved::Node(id))
+        }
+        Selector::Alias { alias: name, doc: None } => {
+            if ctx.ambiguous.contains(name.as_str()) {
+                return Err(format!(
+                    "alias '{name}' は複数の文書に存在するため無修飾では解決できません(`doc:` で文書を指定してください)"
+                ));
+            }
             let id = *ctx
                 .alias_index
                 .get(name.as_str())

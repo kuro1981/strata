@@ -6,8 +6,13 @@ use crate::value::YValue;
 
 #[derive(Debug, Clone)]
 pub enum Selector {
-    /// alias から直接ノードを引く(D31 一級セレクタ)。
-    Alias(String),
+    /// alias から直接ノードを引く(D31 一級セレクタ)。`doc`(WP-W3、sml-spec §1.10)は
+    /// ワークスペースモードでの文書スコープ修飾: `Some(d)` なら文書 alias `d` の中の
+    /// ブロック alias として引く(SML 側の `<文書alias>/<ブロックalias>` と同じ発想)。
+    /// `None`(無指定)は単一文書モード=その文書、ワークスペースモード=alias が
+    /// ワークスペース全体で一意なら解決・複数文書にまたがれば曖昧エラー(裁量、
+    /// docs/view-def-v1.md 参照)。
+    Alias { alias: String, doc: Option<String> },
     /// class を持つ唯一のノードを引く(D31 一級セレクタ)。複数該当は Warning。
     Class(String),
     /// 見出しテキスト一致(D31: Warning 付きエスケープハッチ)。

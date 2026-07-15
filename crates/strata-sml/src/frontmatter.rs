@@ -30,10 +30,10 @@ pub(crate) fn parse_frontmatter(src: &str, diags: &mut Vec<Diag>) -> (Option<Fro
     });
 
     let Some(close_idx) = close_idx else {
-        // 閉じが無い: ファイル末尾まで飲み込み、best-effort で id/title を拾いつつ
+        // 閉じが無い: ファイル末尾まで飲み込み、best-effort で id/title/alias を拾いつつ
         // UnclosedFrontmatter を報告する(scan.rs の UnclosedFence と同じ方針)。
         let last = lines.len() - 1;
-        let (id, title) = parse_body(src, &lines[1..], diags);
+        let (id, title, alias) = parse_body(src, &lines[1..], diags);
         diags.push(Diag::new(
             DiagKind::UnclosedFrontmatter,
             open_span,
@@ -45,30 +45,32 @@ pub(crate) fn parse_frontmatter(src: &str, diags: &mut Vec<Diag>) -> (Option<Fro
             open_span,
             id,
             title,
+            alias,
             close_span: Span::new(end, end),
         };
         return (Some(fm), end);
     };
 
-    let (id, title) = parse_body(src, &lines[1..close_idx], diags);
+    let (id, title, alias) = parse_body(src, &lines[1..close_idx], diags);
     let close_span = lines[close_idx].content;
     let body_start = lines[close_idx].full.end;
-    let fm = Frontmatter { span: Span::new(0, body_start), open_span, id, title, close_span };
+    let fm = Frontmatter { span: Span::new(0, body_start), open_span, id, title, alias, close_span };
     (Some(fm), body_start)
 }
 
 /// 開き `---` と閉じ `---` の間の行を `key: value` として解釈する(コロン後の空白は
-/// 任意)。空行は無視する。キーが `id` / `title` 以外なら `UnknownFrontmatterKey`。
-/// `id` の値が ULID でなければ `BadIdValue`(sml-spec §2.1)。同一キーが複数回
-/// 現れたら `DuplicateFrontmatterKey`(D17、`Warning`)。挙動は従来どおり後勝ち
-/// (最後の出現が採用される)のまま変えない。
-fn parse_body(
-    src: &str,
-    lines: &[PhysLine],
-    diags: &mut Vec<Diag>,
-) -> (Option<(RefTarget, Span)>, Option<String>) {
+/// 任意)。空行は無視する。キーが `id` / `title` / `alias` 以外なら
+/// `UnknownFrontmatterKey`(D41、v0 の許可キーは3つ)。`id` の値が ULID でなければ
+/// `BadIdValue`(sml-spec §2.1)。`alias` の値が key 字句(`[A-Za-z0-9_-]+`)に
+/// 違反すれば `BadKeyCharset`。同一キーが複数回現れたら `DuplicateFrontmatterKey`
+/// (D17、`Warning`)。挙動は従来どおり後勝ち(最後の出現が採用される)のまま変えない。
+/// `parse_body` の戻り値: `(id, title, alias)`。
+type FrontmatterBody = (Option<(RefTarget, Span)>, Option<String>, Option<(String, Span)>);
+
+fn parse_body(src: &str, lines: &[PhysLine], diags: &mut Vec<Diag>) -> FrontmatterBody {
     let mut id = None;
     let mut title = None;
+    let mut alias = None;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in lines {
@@ -118,15 +120,32 @@ fn parse_body(
             "title" => {
                 title = Some(value.to_string());
             }
+            "alias" => {
+                if !is_valid_key_charset(value) {
+                    diags.push(Diag::new(
+                        DiagKind::BadKeyCharset,
+                        value_span,
+                        format!("フロントマターの alias '{value}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
+                    ));
+                }
+                alias = Some((value.to_string(), value_span));
+            }
             _ => {
                 diags.push(Diag::new(
                     DiagKind::UnknownFrontmatterKey,
                     line.content,
-                    format!("未知のフロントマターキー '{key}' です(v0 は id / title のみ)"),
+                    format!("未知のフロントマターキー '{key}' です(v0 は id / title / alias のみ)"),
                 ));
             }
         }
     }
 
-    (id, title)
+    (id, title, alias)
+}
+
+/// key 字句(`[A-Za-z0-9_-]+`)の検証(D5)。block.rs / inline.rs にも同名の
+/// private ヘルパがある(既存の意図的な小重複の流儀 — このモジュールだけが
+/// 依存する共有 crate を新設するほどではないため)。
+fn is_valid_key_charset(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

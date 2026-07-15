@@ -1,4 +1,5 @@
 use clap::{Args as ClapArgs, Parser, Subcommand};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use strata_sml::Span;
@@ -45,8 +46,13 @@ struct FmtArgs {
 
 #[derive(ClapArgs, Debug)]
 struct BuildArgs {
-    /// SML file to build
-    file: PathBuf,
+    /// SML file to build (omit when using --workspace)
+    file: Option<PathBuf>,
+
+    /// Build a workspace instead of a single file: path to a strata.toml
+    /// (D41/D43, docs/sml-spec.md §1.10). Mutually exclusive with `file`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
 
     /// Write the graph JSON to this file instead of stdout
     #[arg(short, long)]
@@ -84,8 +90,14 @@ struct RenderArgs {
 
 #[derive(ClapArgs, Debug)]
 struct ViewArgs {
-    /// SML file to build and apply the view definition to
-    file: PathBuf,
+    /// SML file to build and apply the view definition to (omit when using
+    /// --workspace)
+    file: Option<PathBuf>,
+
+    /// Apply the view to a workspace instead of a single file: path to a
+    /// strata.toml (WP-W3, D43). Mutually exclusive with `file`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
 
     /// View definition YAML (D30〜D34, docs/view-def-v1.md)
     #[arg(long = "view")]
@@ -197,26 +209,42 @@ fn run_context(args: ContextArgs) {
     std::process::exit(0);
 }
 
-/// `strata-cli view` サブコマンド(D30/D33、docs/view-v1-handoff.md WP-W2)。
+/// `strata-cli view` サブコマンド(D30/D33、docs/view-v1-handoff.md WP-W2、
+/// `--workspace` は M7 WP-W3)。
 ///
-/// 内部で `strata_build::build` → `strata_view::apply`(または `--check` なら
-/// `strata_view::check`)を呼ぶ。exit code は他コマンドと同じ 0/1/2 の慣習:
+/// 内部で `strata_build::build`(または `--workspace` なら `build_workspace`)→
+/// `strata_view::apply`/`apply_workspace`(または `--check` なら
+/// `check`/`check_workspace`)を呼ぶ。exit code は他コマンドと同じ 0/1/2 の慣習:
 /// 2 = SML/ビュー定義/マニフェストを読めない・パースできない(全か無か)、
 /// 1 = 書き込み失敗、または `--check` で診断あり、0 = 成功/診断なし。
 /// Warning は stderr に出しつつ exit 0(D17 と同じ扱い)。
 fn run_view(args: ViewArgs) {
-    let src = match fs::read_to_string(&args.file) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read input file: {}", e);
-            std::process::exit(1);
-        }
-    };
-
     let view_src = match fs::read_to_string(&args.view) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read view definition file: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let view = match strata_view::parse_view_def(&view_src) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("-:-: ViewDefError: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members) => run_view_workspace(members, view, &args),
+        InputMode::Single(file) => run_view_single(file, view, &args),
+    }
+}
+
+fn run_view_single(file: PathBuf, view: strata_view::ViewDef, args: &ViewArgs) {
+    let src = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
             std::process::exit(1);
         }
     };
@@ -234,16 +262,8 @@ fn run_view(args: ViewArgs) {
     };
     print_warnings(&out.warnings, &src);
 
-    let view = match strata_view::parse_view_def(&view_src) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("-:-: ViewDefError: {}", e);
-            std::process::exit(2);
-        }
-    };
-
     if args.check {
-        run_view_check(&out, &view, &args);
+        run_view_check(&out, &view, args);
         return;
     }
 
@@ -258,9 +278,53 @@ fn run_view(args: ViewArgs) {
     for w in &warnings {
         eprintln!("-:-: warning: View: {}", w);
     }
+    write_view_outputs(&files, args.output.clone());
+}
 
-    let outdir = args.output.unwrap_or_else(|| PathBuf::from("."));
-    for f in &files {
+/// `strata view --workspace`(WP-W3.1)。`strata build --workspace` と同じ
+/// エラー表示(ファイル名付き)を再利用する。
+fn run_view_workspace(members: Vec<strata_build::Member>, view: strata_view::ViewDef, args: &ViewArgs) {
+    let sources: BTreeMap<String, String> =
+        members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    let out = match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    for w in &out.warnings {
+        let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+        eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+    }
+
+    if args.check {
+        run_view_check_workspace(&out, &view, args);
+        return;
+    }
+
+    let profile = args.profile.as_deref();
+    let (files, warnings) = match strata_view::apply_workspace(&out, &view, profile) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("-:-: ViewError: {}", e);
+            std::process::exit(2);
+        }
+    };
+    for w in &warnings {
+        eprintln!("-:-: warning: View: {}", w);
+    }
+    write_view_outputs(&files, args.output.clone());
+}
+
+fn write_view_outputs(files: &[strata_view::OutputFile], output: Option<PathBuf>) {
+    let outdir = output.unwrap_or_else(|| PathBuf::from("."));
+    for f in files {
         let path = outdir.join(&f.path);
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
@@ -281,6 +345,19 @@ fn run_view(args: ViewArgs) {
 /// ディレクトリを基準に)解決して読み込み、`strata_view::check` の結果を
 /// 「-:-: 種別: メッセージ」形式で全件 stderr に出す。診断が1件でもあれば exit 1。
 fn run_view_check(out: &strata_build::BuildOutput, view: &strata_view::ViewDef, args: &ViewArgs) {
+    let manifest = load_manifest_for_check(view, args);
+    let report = strata_view::check(out, view, &manifest);
+    report_check_and_exit(&report);
+}
+
+/// `run_view_check` のワークスペース版(WP-W3.1)。
+fn run_view_check_workspace(out: &strata_build::WorkspaceBuildOutput, view: &strata_view::ViewDef, args: &ViewArgs) {
+    let manifest = load_manifest_for_check(view, args);
+    let report = strata_view::check_workspace(out, view, &manifest);
+    report_check_and_exit(&report);
+}
+
+fn load_manifest_for_check(view: &strata_view::ViewDef, args: &ViewArgs) -> strata_view::Manifest {
     let Some(manifest_rel) = &view.manifest else {
         eprintln!("-:-: ViewDefError: --check にはビュー定義の `manifest:` 宣言が必要です。");
         std::process::exit(2);
@@ -293,15 +370,16 @@ fn run_view_check(out: &strata_build::BuildOutput, view: &strata_view::ViewDef, 
             std::process::exit(1);
         }
     };
-    let manifest = match strata_view::parse_manifest(&manifest_src) {
+    match strata_view::parse_manifest(&manifest_src) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("-:-: ManifestError: {}", e);
             std::process::exit(2);
         }
-    };
+    }
+}
 
-    let report = strata_view::check(out, view, &manifest);
+fn report_check_and_exit(report: &strata_view::CheckReport) -> ! {
     for w in &report.warnings {
         eprintln!("-:-: warning: View: {}", w);
     }
@@ -368,9 +446,100 @@ fn run_fmt(args: FmtArgs) {
     }
 }
 
-/// `strata-cli build` サブコマンド(docs/sml-build-m3-handoff.md D-B6)。
+/// `strata.toml` の `[workspace]` テーブル(WP-W2.1)。TOML クレートの選定は裁量
+/// (`toml` — serde 経由でこの最小 struct にそのまま写せるため、素朴な TOML には
+/// これで十分。裁量、最終報告参照)。
+#[derive(serde::Deserialize)]
+struct StrataToml {
+    workspace: WorkspaceToml,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkspaceToml {
+    /// strata.toml からの相対パス。グロブ可(`glob` クレート、WP-W2.1)。
+    members: Vec<String>,
+}
+
+/// `strata.toml` を読み、`members` を展開して全メンバーのソースを読み込む
+/// (WP-W2.1)。グロブ文字(`*`/`?`/`[`)を含まないエントリはグロブを経由せず直接
+/// 読む(存在しなければ明確な I/O エラーになる — グロブに通すと0件マッチが
+/// 「黙って空」になりかねないため、D40 の教訓どおり黙って落とさない)。
+/// `Member::path` は診断表示用の相対パス文字列(strata.toml のディレクトリ基準)。
+fn load_workspace_members(toml_path: &Path) -> Result<Vec<strata_build::Member>, String> {
+    let toml_src = fs::read_to_string(toml_path)
+        .map_err(|e| format!("Failed to read {}: {}", toml_path.display(), e))?;
+    let parsed: StrataToml =
+        toml::from_str(&toml_src).map_err(|e| format!("Failed to parse {}: {}", toml_path.display(), e))?;
+    let base = toml_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+
+    let mut resolved: Vec<PathBuf> = Vec::new();
+    for pattern in &parsed.workspace.members {
+        if pattern.contains(['*', '?', '[']) {
+            let full_pattern = base.join(pattern);
+            let matches_iter = glob::glob(&full_pattern.to_string_lossy())
+                .map_err(|e| format!("strata.toml の members グロブ '{pattern}' が不正です: {e}"))?;
+            let mut matches: Vec<PathBuf> = matches_iter.filter_map(Result::ok).collect();
+            if matches.is_empty() {
+                return Err(format!("strata.toml の members グロブ '{pattern}' に一致するファイルがありません"));
+            }
+            matches.sort();
+            resolved.extend(matches);
+        } else {
+            resolved.push(base.join(pattern));
+        }
+    }
+    resolved.sort();
+    resolved.dedup();
+
+    let mut members = Vec::with_capacity(resolved.len());
+    for path in resolved {
+        let src =
+            fs::read_to_string(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+        let display_path = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().into_owned();
+        members.push(strata_build::Member { path: display_path, src });
+    }
+    Ok(members)
+}
+
+/// `BuildArgs`/`ViewArgs` 共通: `file`/`--workspace` の組み合わせを検証し、
+/// ワークスペースモードなら展開済みメンバー列、単一ファイルモードならそのファイルの
+/// パスを返す。両方指定・両方省略はエラー(exit 2)。
+enum InputMode {
+    Single(PathBuf),
+    Workspace(Vec<strata_build::Member>),
+}
+
+fn resolve_input_mode(file: Option<PathBuf>, workspace: Option<PathBuf>) -> InputMode {
+    match (file, workspace) {
+        (Some(_), Some(_)) => {
+            eprintln!("file と --workspace は同時に指定できません。");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            eprintln!("file か --workspace のいずれかが必要です。");
+            std::process::exit(2);
+        }
+        (Some(f), None) => InputMode::Single(f),
+        (None, Some(w)) => match load_workspace_members(&w) {
+            Ok(members) => InputMode::Workspace(members),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(2);
+            }
+        },
+    }
+}
+
+/// `strata-cli build` サブコマンド(docs/sml-build-m3-handoff.md D-B6、
+/// `--workspace` は WP-W2.2)。
 fn run_build(args: BuildArgs) {
-    let src = match fs::read_to_string(&args.file) {
+    if let InputMode::Workspace(members) = resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        run_build_workspace(members, args.output);
+        return;
+    }
+    let file = args.file.expect("resolve_input_mode returned Single only when file is Some");
+
+    let src = match fs::read_to_string(&file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read input file: {}", e);
@@ -413,6 +582,87 @@ fn run_build(args: BuildArgs) {
                 }
             }
             std::process::exit(0);
+        }
+    }
+}
+
+/// `strata-cli build --workspace` サブコマンド(WP-W2.2)。全メンバーを一括パースし、
+/// 横断参照を解決した単一の統合グラフ(`WorkspaceBuildOutput`)を出力する。
+fn run_build_workspace(members: Vec<strata_build::Member>, output: Option<PathBuf>) {
+    let sources: BTreeMap<String, String> =
+        members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => {
+            for w in &out.warnings {
+                let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+                eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+            }
+
+            let json = match serde_json::to_string_pretty(&out) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("Failed to serialize workspace build output: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            match output {
+                Some(path) => {
+                    if let Err(e) = write_atomic(&path, &json) {
+                        eprintln!("Failed to write output file: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+                None => {
+                    println!("{}", json);
+                }
+            }
+            std::process::exit(0);
+        }
+    }
+}
+
+/// `WorkspaceError` 1件を「ファイル:行:列: 種別: メッセージ」形式の行(複数になりうる)
+/// に変換する(WP-W2.3: 診断にファイル名を含める。裁量: 「行:列:」の前に「ファイル:」を
+/// 前置する体裁を選んだ)。`Member` はファイル固有の `BuildError` を
+/// `format_build_error` に委譲しつつ先頭にファイル名を足すだけ。`DuplicateDocAlias`/
+/// `UlidCollision` はソース位置を持たないため、関係する全ファイルぶん「ファイル:-:-:」
+/// の行を1つずつ出す。
+fn format_workspace_error(e: &strata_build::WorkspaceError, sources: &BTreeMap<String, String>) -> Vec<String> {
+    use strata_build::WorkspaceError as WE;
+    match e {
+        WE::DuplicateDocAlias { alias, paths } => paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "{p}:-:-: DuplicateDocAlias: 文書 alias '{alias}' が複数ファイルで宣言されています({})",
+                    paths.join(", ")
+                )
+            })
+            .collect(),
+        WE::UlidCollision { id, paths } => paths
+            .iter()
+            .map(|p| {
+                format!(
+                    "{p}:-:-: UlidCollision: ID '{}' が複数ファイルで宣言されています({})",
+                    id.0,
+                    paths.join(", ")
+                )
+            })
+            .collect(),
+        WE::Member { path, error } => {
+            let label = if path.is_empty() { "(workspace)" } else { path.as_str() };
+            let src = sources.get(path).map(String::as_str).unwrap_or("");
+            format_build_error(error, src).into_iter().map(|line| format!("{label}:{line}")).collect()
         }
     }
 }
@@ -559,6 +809,31 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
         E::BadClass { span, msg } => {
             let (line, col) = at(*span, src);
             vec![format!("{}:{}: BadClass: {}", line, col, msg)]
+        }
+        // WP-W1.3: 単一ファイル build で doc 修飾参照(`<文書alias>/<ブロックalias>`)に
+        // 遭遇した。黙って落とさず `--workspace` の必要性を案内する(D42)。
+        E::CrossDocRef { doc, alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: CrossDocRef: 参照 '{}/{}' はワークスペース build(`strata build --workspace <strata.toml>`)が必要です。",
+                line, col, doc, alias
+            )]
+        }
+        // WP-W2.3: ワークスペース build 中の doc 修飾参照の未解決(文書 alias 側)。
+        E::UnknownDocAlias { doc, alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: UnknownDocAlias: 参照 '{}/{}' — 文書 alias '{}' を持つメンバーがワークスペースにありません。",
+                line, col, doc, alias, doc
+            )]
+        }
+        // WP-W2.3: ワークスペース build 中の doc 修飾参照の未解決(ブロック alias 側)。
+        E::UnknownBlockAlias { doc, alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: UnknownBlockAlias: 参照 '{}/{}' — 文書 '{}' にブロック alias '{}' がありません。",
+                line, col, doc, alias, doc, alias
+            )]
         }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }

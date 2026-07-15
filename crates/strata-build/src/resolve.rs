@@ -39,6 +39,13 @@ pub(crate) struct Registration {
     pub id: NodeId,
 }
 
+/// doc alias → (ブロック alias → NodeId)。ワークスペース横断参照(D42)の解決に
+///使う、build ごとに使い捨てのインメモリ index(「store/index 分離」の index 側)。
+/// 各文書の `Registry::alias_table` をそのまま複製したものを、文書の frontmatter
+/// alias をキーにまとめる。単一ファイル build ではこの index は無い
+/// (`None` → `CrossDocRef`)。
+pub(crate) type CrossDocIndex = HashMap<String, HashMap<String, NodeId>>;
+
 pub(crate) struct Registry {
     /// ブロック(またはリスト項目)の Span → 解決済み(またはプレースホルダの)登録情報。
     pub by_span: HashMap<Span, Registration>,
@@ -70,8 +77,17 @@ pub(crate) fn build_registry(doc: &SmlDocument, errors: &mut Vec<BuildError>) ->
     if let Some(fm) = &doc.frontmatter {
         match &fm.id {
             Some((RefTarget::Ulid(u), _)) => {
-                reg.document_id = Some(NodeId(*u));
-                reg.node_kind.insert(NodeId(*u), NodeKindTag::Document);
+                let id = NodeId(*u);
+                reg.document_id = Some(id);
+                reg.node_kind.insert(id, NodeKindTag::Document);
+                // D41: フロントマターの `alias:` を Document ノードの alias として登録する
+                // (D26 の Node.alias に乗る、block レベルの alias と同じ表・同じ重複検出
+                // 経路を共有する)。
+                if let Some((alias, alias_span)) = &fm.alias {
+                    alias_defs.entry(alias.clone()).or_default().push(*alias_span);
+                    reg.alias_table.entry(alias.clone()).or_insert(id);
+                    reg.id_alias.insert(id, alias.clone());
+                }
             }
             _ => {
                 // `RefTarget::Label` はフロントマターパーサが既に `BadIdValue` を積んで
@@ -181,7 +197,9 @@ fn register_line_type(
                     reg.id_alias.insert(id, alias.clone());
                 }
             }
-            RefTarget::Label(_) => {
+            // id タグ(宣言側)は doc 修飾を生成しない(`parse_ref_target` の契約、
+            // sml-sml/src/block.rs)。到達すれば防御的に MissingId 同様に扱う。
+            RefTarget::Label(_) | RefTarget::DocLabel { .. } => {
                 errors.push(BuildError::MissingId { span: tag.inner_span });
                 reg.by_span.insert(span_for_missing, placeholder());
             }

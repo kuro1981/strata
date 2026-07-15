@@ -556,11 +556,32 @@ fn list_marker_start_value_of(src: &str, span: Span) -> Option<u64> {
     crate::scan::list_marker_start_value(stripped)
 }
 
+/// id タグ(宣言側: `{#...}` / フロントマターの `id:`)専用。ULID か人間ラベルかだけを
+/// 区別する — 宣言側は doc 修飾(`/`)を受理しない(D42: doc 修飾は参照側のみの構文)。
 pub(crate) fn parse_ref_target(token: &str) -> RefTarget {
     match token.parse::<Ulid>() {
         Ok(u) => RefTarget::Ulid(u),
         Err(_) => RefTarget::Label(token.to_string()),
     }
+}
+
+/// 参照側(`ref:` セル/record 値)専用。ULID / `<文書alias>/<ブロックalias>`
+/// (D41/D42)/ 無修飾ラベルを振り分ける。`inline.rs::resolve_target` の
+/// スキーム参照(`[text](ref:...)` 等)と同じ分割規則だが、こちらは診断を積まない
+/// (このパースの既存呼び出し元 `value.rs` がもともと字句検証をしていなかった
+/// 挙動を維持する裁量。最終報告参照)。
+pub(crate) fn parse_scoped_ref_target(token: &str) -> RefTarget {
+    if let Ok(u) = token.parse::<Ulid>() {
+        return RefTarget::Ulid(u);
+    }
+    if let Some((doc, alias)) = token.split_once('/')
+        && !doc.is_empty()
+        && !alias.is_empty()
+        && !alias.contains('/')
+    {
+        return RefTarget::DocLabel { doc: doc.to_string(), alias: alias.to_string() };
+    }
+    RefTarget::Label(token.to_string())
 }
 
 struct ParsedIdTagInner {
