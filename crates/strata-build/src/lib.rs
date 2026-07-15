@@ -19,7 +19,7 @@ mod term;
 mod workspace;
 
 pub use error::BuildError;
-pub use workspace::{build_workspace, DocRoot, FileDiag, Member, WorkspaceBuildOutput, WorkspaceError};
+pub use workspace::{build_workspace, doc_ownership, DocRoot, FileDiag, Member, WorkspaceBuildOutput, WorkspaceError};
 
 use serde::{Deserialize, Serialize};
 use strata_core::{Graph, NodeId};

@@ -495,6 +495,55 @@ impl Graph {
     }
 }
 
+// --- D46: class の実効セマンティクス統一 -------------------------------------------
+//
+// 「実効 class = 自身 + 祖先(contains 上流)の class の和集合」の定義を1箇所に集約する
+// (sml-spec.md §1.11 D46)。render --hide / context --class / view の class フィルタの
+// 全消費者がここを経由することで、コンテナ(Section・List・Quote 等)に付けた class が
+// サブツリー全体へ継承される挙動を一致させる。
+use std::collections::{HashMap, HashSet};
+
+/// `contains` エッジから「子 → 親」の逆引き表を1回だけ構築する。D46 の実効 class
+/// 計算・位置文脈算出(strata-context)など、祖先チェーンを繰り返し辿る消費者が
+/// 使い回すための共有ヘルパ(build のたびに作り直す使い捨てのインメモリ表)。
+pub fn parent_index(graph: &Graph) -> HashMap<NodeId, NodeId> {
+    let mut parents = HashMap::new();
+    for e in &graph.edges {
+        if e.rel == Rel::Contains {
+            parents.entry(e.to).or_insert(e.from);
+        }
+    }
+    parents
+}
+
+/// D46: `id` の実効 class(自身 + 祖先の `Node.classes` の和集合)。
+pub fn effective_classes(graph: &Graph, parents: &HashMap<NodeId, NodeId>, id: NodeId) -> HashSet<String> {
+    let mut set = HashSet::new();
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        if let Some(node) = graph.nodes.get(&c) {
+            set.extend(node.classes.iter().cloned());
+        }
+        cur = parents.get(&c).copied();
+    }
+    set
+}
+
+/// D46: `id` の実効 class が `tags` のいずれかを含むか(`effective_classes` の
+/// alloc なし早期終了版。`render --hide`(複数 class 同時判定)や1件ずつの判定に使う)。
+pub fn has_effective_class(graph: &Graph, parents: &HashMap<NodeId, NodeId>, id: NodeId, tags: &HashSet<&str>) -> bool {
+    let mut cur = Some(id);
+    while let Some(c) = cur {
+        if let Some(node) = graph.nodes.get(&c)
+            && node.classes.iter().any(|cl| tags.contains(cl.as_str()))
+        {
+            return true;
+        }
+        cur = parents.get(&c).copied();
+    }
+    false
+}
+
 // 不変条件チェック(§1)
 //
 // 型で守れるもの(不変条件2 物理排除)は型で守った。残りは実行時に検証する。

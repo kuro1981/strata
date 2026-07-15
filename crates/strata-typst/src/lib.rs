@@ -49,9 +49,29 @@ pub fn render_to_typst_with_hide(
     fallback_title: &str,
     hide: &[String],
 ) -> Result<RenderOutput, String> {
+    render_to_typst_workspace_with_hide(graph, root, fallback_title, hide, None)
+}
+
+/// D44(sml-spec.md §1.11): `render --workspace` の本体。単一文書版
+/// (`render_to_typst_with_hide`)に、クロスドキュメント `Ref` の退化テキスト化
+/// (`workspace` が `Some` のとき)を足したもの。`workspace` が `None` なら
+/// 単一文書モードと完全に同じ経路になる(後方互換)。
+///
+/// Typst は単一ファイルの PDF なので、他文書のノードへ実リンクは張れない
+/// (D44「Typst 単文書出力での他文書参照は退化テキスト」)。対象が現在描画中の
+/// 文書と異なる場合、表示テキスト(または見出しノードならその平文、それ以外は
+/// 「参照」)に文書名注記 `（<文書名>）` を添えてプレーンテキスト化する(体裁は裁量、
+/// 最終報告参照)。
+pub fn render_to_typst_workspace_with_hide(
+    graph: &Graph,
+    root: NodeId,
+    fallback_title: &str,
+    hide: &[String],
+    workspace: Option<WorkspaceRenderCtx<'_>>,
+) -> Result<RenderOutput, String> {
     let hide_set: HashSet<&str> = hide.iter().map(String::as_str).collect();
     let hidden = compute_hidden(graph, &hide_set);
-    let mut renderer = TypstRenderer::new(graph, hidden);
+    let mut renderer = TypstRenderer::new(graph, hidden, workspace);
     let (title, content) = renderer.render_root(root, fallback_title)?;
     let warnings = renderer.warnings;
 
@@ -106,25 +126,38 @@ pub fn render_to_typst_with_hide(
     Ok(RenderOutput { text: doc, warnings })
 }
 
-/// class(D23)による非表示化の対象ノード集合を計算する。`hide` に列挙された class を
-/// 1つでも持つノードを種として、contains の子孫を BFS で辿り、サブツリーごと集める。
+/// class(D23/D46)による非表示化の対象ノード集合を計算する。「実効 class(自身+祖先の
+/// 和集合、strata_core::has_effective_class)が `hide` のいずれかを含む」ノード全体が
+/// 対象になる — コンテナ(Section 等)に付けた class がサブツリー全体へ継承される
+/// (D46 で定義を1箇所に統一。旧実装は「hide class を持つノードを種に contains を
+/// BFS で下る」という等価だが独立した実装だったため、`tests.rs` に同値性テストを
+/// 固定してこの置き換えを検証している)。
 fn compute_hidden(graph: &Graph, hide: &HashSet<&str>) -> HashSet<NodeId> {
-    let mut hidden = HashSet::new();
     if hide.is_empty() {
-        return hidden;
+        return HashSet::new();
     }
-    let mut stack: Vec<NodeId> = graph
+    let parents = strata_core::parent_index(graph);
+    graph
         .nodes
-        .iter()
-        .filter(|(_, n)| n.classes.iter().any(|c| hide.contains(c.as_str())))
-        .map(|(id, _)| *id)
-        .collect();
-    while let Some(id) = stack.pop() {
-        if hidden.insert(id) {
-            stack.extend(graph.children_of(id));
-        }
-    }
-    hidden
+        .keys()
+        .copied()
+        .filter(|&id| strata_core::has_effective_class(graph, &parents, id, hide))
+        .collect()
+}
+
+/// D44: `render --workspace` 専用のクロスドキュメント描画コンテキスト。
+/// `render_to_typst_with_hide`(単一文書モード)では使わない。
+#[derive(Clone, Copy)]
+pub struct WorkspaceRenderCtx<'a> {
+    /// ノード → 所属文書(`strata_build::DocRoot::path`)。`strata_build::doc_ownership`
+    /// が作る表をそのまま渡す想定。
+    pub doc_of: &'a HashMap<NodeId, String>,
+    /// 文書(`DocRoot::path`)→ 退化テキストに添える表示名(裁量: `Document.title` が
+    /// あればそれ、無ければ呼び出し側がファイル名 stem 等をフォールバックとして渡す)。
+    pub doc_titles: &'a HashMap<String, String>,
+    /// 今まさに描画している文書の `DocRoot::path`。`doc_of` の値と比較して
+    /// クロスドキュメント参照かどうかを判定する。
+    pub current_doc: &'a str,
 }
 
 struct TypstRenderer<'a> {
@@ -134,11 +167,13 @@ struct TypstRenderer<'a> {
     hidden: HashSet<NodeId>,
     /// 非表示ノードへの `Ref` を剥がした際の警告(D23)。
     warnings: Vec<String>,
+    /// D44: `Some` ならワークスペースモード(クロスドキュメント Ref の退化テキスト化)。
+    workspace: Option<WorkspaceRenderCtx<'a>>,
 }
 
 impl<'a> TypstRenderer<'a> {
-    fn new(graph: &'a Graph, hidden: HashSet<NodeId>) -> Self {
-        Self { graph, hidden, warnings: Vec::new() }
+    fn new(graph: &'a Graph, hidden: HashSet<NodeId>, workspace: Option<WorkspaceRenderCtx<'a>>) -> Self {
+        Self { graph, hidden, warnings: Vec::new(), workspace }
     }
 
     fn is_hidden(&self, id: NodeId) -> bool {
@@ -446,6 +481,27 @@ impl<'a> TypstRenderer<'a> {
             } else {
                 format!("(非表示){}", coord_suffix)
             };
+        }
+
+        // D44: クロスドキュメント参照(対象が今描画中の文書と異なる)は、単一ファイル
+        // PDF の Typst ラベルを跨げないため常に退化テキスト化する(--hide の非表示と
+        // 同じ「リンクを外しプレーンテキスト化」の扱いだが、warnings は積まない —
+        // これはエラー的な状況ではなく D44 が明示的に規定する既定動作のため)。
+        if let Some(ws) = &self.workspace
+            && let Some(owner) = ws.doc_of.get(&to)
+            && owner != ws.current_doc
+        {
+            let doc_title = ws.doc_titles.get(owner).cloned().unwrap_or_else(|| owner.clone());
+            let base = if !text.is_empty() {
+                typst_escape(text)
+            } else {
+                match self.graph.nodes.get(&to).map(|n| &n.payload) {
+                    Some(NodePayload::Section(s)) => typst_escape(&self.plain_text(&s.heading)),
+                    Some(_) => "参照".to_string(),
+                    None => "参照".to_string(),
+                }
+            };
+            return format!("{}{}（{}）", base, coord_suffix, typst_escape(&doc_title));
         }
 
         if !text.is_empty() {

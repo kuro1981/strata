@@ -25,8 +25,8 @@ mod render;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use strata_build::BuildOutput;
-use strata_core::{Graph, Node, NodeId, NodePayload, Rel};
+use strata_build::{BuildOutput, WorkspaceBuildOutput};
+use strata_core::{Graph, NodeId, NodePayload, Rel};
 
 pub use addr::resolve_node_ref;
 
@@ -56,6 +56,9 @@ pub enum ContextError {
     UnknownNodeRef(String),
     /// フルドキュメントスコープだが `BuildOutput::root` が無い(フロントマター無し)。
     NoRoot,
+    /// D44: `context --workspace --doc <alias>` に指定された文書 alias が、
+    /// ワークスペースのどのメンバーの frontmatter alias にも一致しない。
+    UnknownDoc(String),
 }
 
 impl std::fmt::Display for ContextError {
@@ -66,6 +69,9 @@ impl std::fmt::Display for ContextError {
             }
             ContextError::NoRoot => {
                 write!(f, "フロントマターがありません(root が None)。全文書スコープには Document ルートが必要です。")
+            }
+            ContextError::UnknownDoc(alias) => {
+                write!(f, "文書 alias '{alias}' を持つメンバーがワークスペースにありません。")
             }
         }
     }
@@ -90,6 +96,62 @@ pub fn render_context(build: &BuildOutput, opts: &ContextOptions) -> Result<Stri
     }
 }
 
+/// 公開 API: `WorkspaceBuildOutput` から AI 向けコンテキスト Markdown を生成する
+/// (D44、sml-spec.md §1.11)。`--node`/`--class`/`--node`+`--class` の3スコープは
+/// 統合グラフ上でそのまま動く(文書境界を跨いで辿れる。位置文脈のパス
+/// (`ancestor_path`)は各ノードの所属文書の `Document.title` を自然に含む)ため、
+/// 単一文書版の `render::render_node_scope`/`render_class_scope`/
+/// `render_node_and_class_scope` をそのまま再利用する。無指定(全文書スコープ)だけ
+/// ワークスペース専用の描画(`render::render_workspace_document_scope`)を使う —
+/// `doc` で1文書に絞り込める(裁量、D44「--doc での絞り込みも可」)。
+pub fn render_context_workspace(
+    ws: &WorkspaceBuildOutput,
+    opts: &ContextOptions,
+    doc: Option<&str>,
+) -> Result<String, ContextError> {
+    let graph = &ws.graph;
+    let scope = resolve_scope(graph, opts)?;
+
+    match scope {
+        Scope::Document => {
+            let roots = resolve_doc_roots(ws, doc)?;
+            let all_doc_owned: HashSet<NodeId> = strata_build::doc_ownership(graph, &ws.roots).into_keys().collect();
+            render::render_workspace_document_scope(graph, &roots, &all_doc_owned)
+        }
+        Scope::Node { ids } => render::render_node_scope(graph, &ids, opts.hops),
+        // 裁量(D44): class/node+class スコープは元々ワークスペース全体(統合グラフ)を
+        // 対象にした横断検索であり、`--doc` による絞り込みは実装しない(単一文書版と
+        // 完全に同じ経路を再利用する。最終報告参照)。
+        Scope::Class { tag } => render::render_class_scope(graph, &tag, None),
+        Scope::NodeAndClass { ids, tag } => render::render_node_and_class_scope(graph, &ids, &tag),
+    }
+}
+
+/// `--doc` の解決: `Some(alias)` ならその frontmatter alias を持つメンバー1件に絞る、
+/// `None` なら Document ルートを持つ全メンバーを `DocRoot::path` 昇順(`ws.roots` は
+/// build 時点で既にソート済み)で返す。
+fn resolve_doc_roots(ws: &WorkspaceBuildOutput, doc: Option<&str>) -> Result<Vec<(String, NodeId)>, ContextError> {
+    match doc {
+        Some(alias) => {
+            let r = ws
+                .roots
+                .iter()
+                .find(|r| r.alias.as_deref() == Some(alias))
+                .ok_or_else(|| ContextError::UnknownDoc(alias.to_string()))?;
+            let root = r.root.ok_or(ContextError::NoRoot)?;
+            Ok(vec![(r.path.clone(), root)])
+        }
+        None => {
+            let out: Vec<(String, NodeId)> =
+                ws.roots.iter().filter_map(|r| r.root.map(|root| (r.path.clone(), root))).collect();
+            if out.is_empty() {
+                return Err(ContextError::NoRoot);
+            }
+            Ok(out)
+        }
+    }
+}
+
 fn resolve_scope(graph: &Graph, opts: &ContextOptions) -> Result<Scope, ContextError> {
     let node_ids: Vec<NodeId> = opts
         .nodes
@@ -106,19 +168,6 @@ fn resolve_scope(graph: &Graph, opts: &ContextOptions) -> Result<Scope, ContextE
 }
 
 // --- 共有ユーティリティ(render.rs / addr.rs から使う内部型) -----------------------
-
-/// `contains` エッジから「子 → 親」の逆引き表を1回だけ構築する(位置文脈の算出用)。
-/// 複数親(トランスクルージョン)を持つノードは最初に現れたエッジを採用する
-/// (`Graph::edges` の格納順は build が決定的に積むため、これも決定的)。
-pub(crate) fn parent_index(graph: &Graph) -> HashMap<NodeId, NodeId> {
-    let mut parents = HashMap::new();
-    for e in &graph.edges {
-        if e.rel == Rel::Contains {
-            parents.entry(e.to).or_insert(e.from);
-        }
-    }
-    parents
-}
 
 /// `id` の祖先のうち `Section`/`Document` である見出しテキストを根 → 葉の順に集めた
 /// 「位置文脈パス」(例: `["職務経歴 詳細", "電通総研", "AI人材育成..."]`)。
@@ -162,27 +211,42 @@ pub(crate) fn subtree_ids(graph: &Graph, root: NodeId) -> Vec<NodeId> {
     out
 }
 
-/// class(D23)を1つでも持つノードを文書順(`doc_order`、無ければ `NodeId` 昇順)で返す。
-pub(crate) fn nodes_with_class<'g>(
-    graph: &'g Graph,
+/// D46(sml-spec.md §1.11): `--class <tag>` の対象ノードを、**実効 class**
+/// (自身+祖先(contains 上流)の和集合、`strata_core::has_effective_class`)で判定し、
+/// かつコンテナ(見出し・リスト・引用等)が該当する場合は子を重複列挙しないよう
+/// 「chunk の根」だけを返す。
+///
+/// アルゴリズム: (1) `scope`(`--node` と併用時はその contains サブツリー、
+/// 無指定なら全ノード)の中から実効 class が `tag` を含むノードを集める(`matched`)、
+/// (2) `matched` のうち「`contains` 上流の親が `matched` に含まれない」ものだけを
+/// 「chunk の根」として残す(親が matched に含まれるなら、その親を chunk として
+/// 展開した時点で自分もサブツリーとして出力されるため、二重に列挙しない)。
+/// 親の判定は `scope` に絞った `matched` 集合で行う(裁量: `--node` 併用時、
+/// scope の境界そのものを暗黙の「根」として扱う — 祖先が scope 外にいて matched で
+/// あっても、そこは展開できないので scope 内の子が chunk の根になるのが自然)。
+pub(crate) fn class_chunk_roots(
+    graph: &Graph,
     tag: &str,
-    doc_order: Option<&'g [NodeId]>,
-) -> Vec<(&'g NodeId, &'g Node)> {
-    let matches: HashSet<NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|(_, n)| n.classes.iter().any(|c| c == tag))
-        .map(|(id, _)| *id)
+    parents: &HashMap<NodeId, NodeId>,
+    scope: Option<&HashSet<NodeId>>,
+) -> HashSet<NodeId> {
+    let tags: HashSet<&str> = std::iter::once(tag).collect();
+    let candidates: Vec<NodeId> = match scope {
+        Some(s) => s.iter().copied().collect(),
+        None => graph.nodes.keys().copied().collect(),
+    };
+    let matched: HashSet<NodeId> = candidates
+        .into_iter()
+        .filter(|&id| strata_core::has_effective_class(graph, parents, id, &tags))
         .collect();
-
-    match doc_order {
-        Some(order) => order
-            .iter()
-            .filter(|id| matches.contains(id))
-            .map(|id| (id, &graph.nodes[id]))
-            .collect(),
-        None => graph.nodes.iter().filter(|(id, _)| matches.contains(id)).collect(),
-    }
+    matched
+        .iter()
+        .copied()
+        .filter(|id| match parents.get(id) {
+            Some(p) => !matched.contains(p),
+            None => true,
+        })
+        .collect()
 }
 
 /// 意味エッジ(`Rel::Contains` 以外の全種別)。エッジ種の選別パラメータは保留(D36)

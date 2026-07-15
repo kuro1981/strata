@@ -46,32 +46,95 @@ pub fn render_to_md_with_hide(
     fallback_title: &str,
     hide: &[String],
 ) -> Result<RenderOutput, String> {
+    render_to_md_workspace_with_hide(graph, root, fallback_title, hide, None)
+}
+
+/// D44(sml-spec.md §1.11): `render --workspace --format md` の本体。単一文書版
+/// (`render_to_md_with_hide`)に、クロスドキュメント `Ref` の**相対 .md リンク+
+/// アンカー**化(見出し対象)/文書名付き退化テキスト化(それ以外)を足したもの。
+/// `workspace` が `None` なら単一文書モードと完全に同じ経路になる(後方互換)。
+pub fn render_to_md_workspace_with_hide(
+    graph: &Graph,
+    root: NodeId,
+    fallback_title: &str,
+    hide: &[String],
+    workspace: Option<WorkspaceRenderCtx<'_>>,
+) -> Result<RenderOutput, String> {
     let _ = fallback_title; // 裁量: MD 本文にはタイトルを別出ししない(上記ドキュメント参照)。
     let hide_set: HashSet<&str> = hide.iter().map(String::as_str).collect();
     let hidden = compute_hidden(graph, &hide_set);
-    let mut renderer = MdRenderer::new(graph, hidden);
+    let mut renderer = MdRenderer::new(graph, hidden, workspace);
     let text = renderer.render_root(root)?;
     Ok(RenderOutput { text, warnings: renderer.warnings })
 }
 
-/// class(D23)による非表示化の対象ノード集合(strata-typst::compute_hidden と同一ロジック)。
-fn compute_hidden(graph: &Graph, hide: &HashSet<&str>) -> HashSet<NodeId> {
-    let mut hidden = HashSet::new();
-    if hide.is_empty() {
-        return hidden;
-    }
-    let mut stack: Vec<NodeId> = graph
-        .nodes
-        .iter()
-        .filter(|(_, n)| n.classes.iter().any(|c| hide.contains(c.as_str())))
-        .map(|(id, _)| *id)
-        .collect();
-    while let Some(id) = stack.pop() {
-        if hidden.insert(id) {
-            stack.extend(graph.children_of(id));
+/// D44: ワークスペース全体の見出しアンカーを1回だけ事前計算する(`render_to_md_with_hide`
+/// が単一文書内で行う `collect_anchors` と同じスラグ規則を、文書ごとに独立した
+/// スラグ表として全メンバーぶん積む)。クロスドキュメント `Ref` が他文書の見出しへ
+/// 実リンクを張るために必要(D44: MD のページ間リンクは相対 `.md` リンク+アンカー)。
+/// `--hide` は考慮しない(非表示ノードへの参照は `is_hidden` 分岐が先に処理し、この表を
+/// 参照しないため実害無し)。
+pub fn compute_workspace_anchors(graph: &Graph, doc_roots: &[NodeId]) -> HashMap<NodeId, String> {
+    let mut anchors = HashMap::new();
+    for &root in doc_roots {
+        let Some(node) = graph.nodes.get(&root) else { continue };
+        let body_roots: Vec<NodeId> =
+            if matches!(node.payload, NodePayload::Document(_)) { graph.children_of(root) } else { vec![root] };
+
+        fn walk(graph: &Graph, id: NodeId, out: &mut Vec<NodeId>) {
+            out.push(id);
+            for child in graph.children_of(id) {
+                walk(graph, child, out);
+            }
+        }
+        let mut ordered_ids = Vec::new();
+        for &id in &body_roots {
+            walk(graph, id, &mut ordered_ids);
+        }
+
+        let mut table = AnchorTable::default();
+        for id in ordered_ids {
+            if let Some(NodePayload::Section(s)) = graph.nodes.get(&id).map(|n| &n.payload) {
+                let slug = table.assign(&plain_text(&s.heading));
+                anchors.insert(id, slug);
+            }
         }
     }
-    hidden
+    anchors
+}
+
+/// D44: `render --workspace --format md` 専用のクロスドキュメント描画コンテキスト。
+/// 単一文書モード(`render_to_md_with_hide`)では使わない。
+#[derive(Clone, Copy)]
+pub struct WorkspaceRenderCtx<'a> {
+    /// ノード → 所属文書(`strata_build::DocRoot::path`)。`strata_build::doc_ownership`
+    /// が作る表をそのまま渡す想定。
+    pub doc_of: &'a HashMap<NodeId, String>,
+    /// 文書(`DocRoot::path`)→ 出力ファイル名 stem(相対 `.md` リンクの構築に使う。
+    /// D44: 出力ファイル名はメンバーのファイル名 stem 由来)。
+    pub doc_stems: &'a HashMap<String, String>,
+    /// 文書(`DocRoot::path`)→ 退化テキストに添える表示名。
+    pub doc_titles: &'a HashMap<String, String>,
+    /// 今まさに描画している文書の `DocRoot::path`。
+    pub current_doc: &'a str,
+    /// `compute_workspace_anchors` が事前計算した、見出しノード→所属文書内アンカー。
+    pub cross_anchors: &'a HashMap<NodeId, String>,
+}
+
+/// class(D23/D46)による非表示化の対象ノード集合。D46 で定義を strata-core
+/// (`effective_classes`/`has_effective_class`)に一本化した(strata-typst::compute_hidden
+/// と同じロジック — 「実効 class(自身+祖先の和集合)が `hide` のいずれかを含む」)。
+fn compute_hidden(graph: &Graph, hide: &HashSet<&str>) -> HashSet<NodeId> {
+    if hide.is_empty() {
+        return HashSet::new();
+    }
+    let parents = strata_core::parent_index(graph);
+    graph
+        .nodes
+        .keys()
+        .copied()
+        .filter(|&id| strata_core::has_effective_class(graph, &parents, id, hide))
+        .collect()
 }
 
 struct MdRenderer<'a> {
@@ -83,11 +146,13 @@ struct MdRenderer<'a> {
     /// 本文を描画する前に文書順で1回だけ全見出しを走査して確定させる(GitHub の
     /// スラガーと同じ「重複は -1, -2 を付番」規則、`AnchorTable` 参照)。
     anchors: HashMap<NodeId, String>,
+    /// D44: `Some` ならワークスペースモード(クロスドキュメント Ref の相対リンク化)。
+    workspace: Option<WorkspaceRenderCtx<'a>>,
 }
 
 impl<'a> MdRenderer<'a> {
-    fn new(graph: &'a Graph, hidden: HashSet<NodeId>) -> Self {
-        Self { graph, hidden, warnings: Vec::new(), anchors: HashMap::new() }
+    fn new(graph: &'a Graph, hidden: HashSet<NodeId>, workspace: Option<WorkspaceRenderCtx<'a>>) -> Self {
+        Self { graph, hidden, warnings: Vec::new(), anchors: HashMap::new(), workspace }
     }
 
     fn is_hidden(&self, id: NodeId) -> bool {
@@ -314,6 +379,29 @@ impl<'a> MdRenderer<'a> {
                 format!("{}{}", md_escape(text), coord_suffix)
             } else {
                 format!("(非表示){}", coord_suffix)
+            };
+        }
+
+        // D44: クロスドキュメント参照(対象が今描画中の文書と異なる)。見出しへの参照は
+        // 相対 `.md` リンク+アンカー(`compute_workspace_anchors` の事前計算表を引く)、
+        // それ以外は単一文書時の退化規則(§4.4)に文書名を添えたもの(裁量、最終報告参照)。
+        if let Some(ws) = &self.workspace
+            && let Some(owner) = ws.doc_of.get(&to)
+            && owner != ws.current_doc
+        {
+            let stem = ws.doc_stems.get(owner).cloned().unwrap_or_else(|| owner.clone());
+            if let Some(NodePayload::Section(s)) = self.graph.nodes.get(&to).map(|n| &n.payload) {
+                let anchor = ws.cross_anchors.get(&to).cloned().unwrap_or_default();
+                let label = if !text.is_empty() { text.to_string() } else { plain_text(&s.heading) };
+                return format!("[{}]({stem}.md#{anchor}){}", md_escape(&label), coord_suffix);
+            }
+            let doc_title = ws.doc_titles.get(owner).cloned().unwrap_or_else(|| owner.clone());
+            let (kind, caption) = self.degenerate_descriptor(to);
+            let kind = if coord.is_some() { "セル" } else { kind };
+            return if !text.is_empty() {
+                format!("{}（{}: {}、{}）{}", md_escape(text), kind, caption, doc_title, coord_suffix)
+            } else {
+                format!("（{}: {}、{}）{}", kind, caption, doc_title, coord_suffix)
             };
         }
 

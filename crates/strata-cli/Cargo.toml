@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 strata-sml = { path = "../strata-sml" }
+strata-core = { path = "../strata-core" }
 strata-build = { path = "../strata-build" }
 strata-typst = { path = "../strata-typst" }
 strata-md = { path = "../strata-md" }

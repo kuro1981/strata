@@ -102,4 +102,10 @@ pub enum Combinator {
     /// pick: 値をそのまま(型変換のみ)取り出す(旧名 rename。D35 で改名 —
     /// 実態は値の抽出でありリネームではない)。
     Pick { of: Selector, as_type: AsType },
+    /// concat: 複数のコンビネータの評価結果を文字列として連結する(D45、D35 の
+    /// 再裁定)。`parts` の各要素は任意のコンビネータ(pick/date/literal/concat
+    /// 自体の入れ子も可、糖衣文字列も可)。各値は `YValue::as_text()` で文字列化
+    /// してから `separator` で連結する(Map/Seq は空文字列扱い — `pick`/`join` と
+    /// 同じ寛容な扱い、最終報告参照)。
+    Concat { parts: Vec<Combinator>, separator: String },
 }

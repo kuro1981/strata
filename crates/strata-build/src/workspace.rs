@@ -204,3 +204,28 @@ pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<W
         .collect();
     Ok(WorkspaceBuildOutput { graph: shared.graph, roots, doc_aliases, warnings })
 }
+
+/// 各文書の `contains` 部分木を根(`DocRoot::root`)から辿り、ノード → 所属文書
+/// (`DocRoot::path`)の逆引き表を作る(D44: `render --workspace`/`context --workspace`
+/// のクロスドキュメント判定、および WP-W4 の `strata-view::check` 内で個別実装
+/// されていた同じロジックをここへ統一する — 「1箇所に定義」の対象は D46 の class に
+/// 限らず、doc 所属判定も複数消費者が必要とする共有ロジックのため)。
+/// `contains` で辿れない孤立ノード(Term 等)には所有者が付かない。
+pub fn doc_ownership(graph: &Graph, roots: &[DocRoot]) -> HashMap<NodeId, String> {
+    let mut owner: HashMap<NodeId, String> = HashMap::new();
+    for r in roots {
+        let Some(root_id) = r.root else { continue };
+        owner.entry(root_id).or_insert_with(|| r.path.clone());
+        let mut stack = vec![root_id];
+        while let Some(id) = stack.pop() {
+            for child in graph.children_of(id) {
+                if owner.contains_key(&child) {
+                    continue;
+                }
+                owner.insert(child, r.path.clone());
+                stack.push(child);
+            }
+        }
+    }
+    owner
+}

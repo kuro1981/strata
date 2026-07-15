@@ -1,5 +1,5 @@
 use clap::{Args as ClapArgs, Parser, Subcommand};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use strata_sml::Span;
@@ -68,12 +68,25 @@ enum RenderFormat {
 
 #[derive(ClapArgs, Debug)]
 struct RenderArgs {
-    /// SML file to render
-    file: PathBuf,
+    /// SML file to render (omit when using --workspace)
+    file: Option<PathBuf>,
 
-    /// Write the rendered source to this file instead of stdout. The file
-    /// extension is taken verbatim from what the caller passes (not
-    /// inferred from --format).
+    /// Render a workspace instead of a single file: path to a strata.toml
+    /// (D44, sml-spec.md §1.11). Mutually exclusive with `file`. In this mode
+    /// `-o` is always an output *directory* (default: current directory) —
+    /// every rendered member is written as `<member file stem>.<ext>` inside it.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Restrict `--workspace` rendering to a single member (its frontmatter
+    /// `alias`, D41). Omit to render every member. Only valid with `--workspace`.
+    #[arg(long = "doc")]
+    doc: Option<String>,
+
+    /// Write the rendered source to this file instead of stdout (single-file
+    /// mode only). The file extension is taken verbatim from what the caller
+    /// passes (not inferred from --format). In `--workspace` mode this is
+    /// instead the output *directory* (see `--workspace`).
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -124,8 +137,20 @@ struct ViewArgs {
 
 #[derive(ClapArgs, Debug)]
 struct ContextArgs {
-    /// SML file to build and serialize into a context view
-    file: PathBuf,
+    /// SML file to build and serialize into a context view (omit when using
+    /// --workspace)
+    file: Option<PathBuf>,
+
+    /// Serialize a workspace instead of a single file: path to a strata.toml
+    /// (D44, sml-spec.md §1.11). Mutually exclusive with `file`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Restrict the (no --node/--class) full-document scope to a single
+    /// workspace member (its frontmatter `alias`, D41). Omit to concatenate
+    /// every member. Only valid with `--workspace`.
+    #[arg(long = "doc")]
+    doc: Option<String>,
 
     /// Write the context Markdown to this file instead of stdout
     #[arg(short, long)]
@@ -165,7 +190,19 @@ fn main() {
 /// フロントマターが無い(全文書スコープの前提が崩れる)、1 = 書き込み失敗、
 /// 0 = 成功。Warning は他コマンドと同じく stderr に出しつつ exit 0 を妨げない。
 fn run_context(args: ContextArgs) {
-    let src = match fs::read_to_string(&args.file) {
+    match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members) => run_context_workspace(members, args),
+        InputMode::Single(file) => run_context_single(file, args),
+    }
+}
+
+fn run_context_single(file: PathBuf, args: ContextArgs) {
+    if args.doc.is_some() {
+        eprintln!("--doc は --workspace と併用してください。");
+        std::process::exit(2);
+    }
+
+    let src = match fs::read_to_string(&file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read input file: {}", e);
@@ -195,9 +232,48 @@ fn run_context(args: ContextArgs) {
         }
     };
 
-    match args.output {
+    write_context_output(&text, args.output);
+}
+
+/// `strata-cli context --workspace`(WP-Z1、D44)。`strata_build::build_workspace` →
+/// `strata_context::render_context_workspace` を直結する(単一文書版と同じ
+/// exit code の慣習)。
+fn run_context_workspace(members: Vec<strata_build::Member>, args: ContextArgs) {
+    let sources: BTreeMap<String, String> =
+        members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    let ws = match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(ws) => ws,
+    };
+    for w in &ws.warnings {
+        let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+        eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+    }
+
+    let opts = strata_context::ContextOptions { nodes: args.node, hops: args.hops, class: args.class };
+    let text = match strata_context::render_context_workspace(&ws, &opts, args.doc.as_deref()) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("-:-: ContextError: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    write_context_output(&text, args.output);
+}
+
+fn write_context_output(text: &str, output: Option<PathBuf>) -> ! {
+    match output {
         Some(path) => {
-            if let Err(e) = write_atomic(&path, &text) {
+            if let Err(e) = write_atomic(&path, text) {
                 eprintln!("Failed to write output file: {}", e);
                 std::process::exit(1);
             }
@@ -675,7 +751,19 @@ fn format_workspace_error(e: &strata_build::WorkspaceError, sources: &BTreeMap<S
 /// exit code: 成功 0 / 読み書き失敗 1 / BuildError・render エラー 2。
 /// `root: None`(フロントマター無し)は D21 の案内文言で exit 2(両フォーマット共通)。
 fn run_render(args: RenderArgs) {
-    let src = match fs::read_to_string(&args.file) {
+    match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members) => run_render_workspace(members, args),
+        InputMode::Single(file) => run_render_single(file, args),
+    }
+}
+
+fn run_render_single(file: PathBuf, args: RenderArgs) {
+    if args.doc.is_some() {
+        eprintln!("--doc は --workspace と併用してください。");
+        std::process::exit(2);
+    }
+
+    let src = match fs::read_to_string(&file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to read input file: {}", e);
@@ -708,7 +796,7 @@ fn run_render(args: RenderArgs) {
     // D-R2 1.: フォールバック文書名は入力ファイル名(拡張子抜き)を渡す(裁量。
     // Document.title も最初の H1 も無い場合にのみ使われる。`--format md` は現状
     // これを本文に出さない — strata_md::render_to_md_with_hide のドキュメント参照)。
-    let fallback_title = args.file.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
+    let fallback_title = file.file_stem().and_then(|s| s.to_str()).unwrap_or("untitled");
 
     // D23: `--hide` 無しでも常に `*_with_hide` を経由する(hide が空なら挙動は
     // 従来の `render_to_typst`/`render_to_md` と完全一致し、warnings も常に空になる)。
@@ -750,6 +838,137 @@ fn run_render(args: RenderArgs) {
         }
     }
     std::process::exit(0);
+}
+
+/// `strata-cli render --workspace`(WP-Z1、D44)。cross-doc 参照を含む文書の
+/// 再生成不能(M7 の既知副作用)を解消する。`--doc` 省略時は全メンバーを、指定時は
+/// 当該文書のみを出力する。出力は常に `-o <outdir>`(既定カレントディレクトリ)配下に
+/// `<メンバーのファイル名 stem>.<拡張子>` として書く。
+fn run_render_workspace(members: Vec<strata_build::Member>, args: RenderArgs) {
+    let sources: BTreeMap<String, String> =
+        members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    let ws = match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(ws) => ws,
+    };
+    for w in &ws.warnings {
+        let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+        eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+    }
+
+    let selected: Vec<&strata_build::DocRoot> = match &args.doc {
+        Some(alias) => match ws.roots.iter().find(|r| r.alias.as_deref() == Some(alias.as_str())) {
+            Some(r) => vec![r],
+            None => {
+                eprintln!("指定された文書 alias '{}' がワークスペースに見つかりません。", alias);
+                std::process::exit(2);
+            }
+        },
+        None => ws.roots.iter().collect(),
+    };
+
+    // D44: cross-doc `Ref` の描画に使うワークスペース全体の付帯情報。
+    // - doc_of: ノード → 所属文書(`DocRoot::path`)
+    // - doc_titles: 文書 → 退化テキストに添える表示名(Document.title、無ければファイル名 stem)
+    // - doc_stems (md のみ): 文書 → 相対リンクに使う出力ファイル名 stem
+    let doc_of = strata_build::doc_ownership(&ws.graph, &ws.roots);
+    let doc_titles: HashMap<String, String> = ws
+        .roots
+        .iter()
+        .map(|r| {
+            let title = r
+                .root
+                .and_then(|root| ws.graph.nodes.get(&root))
+                .and_then(|n| match &n.payload {
+                    strata_core::NodePayload::Document(d) => d.title.clone(),
+                    _ => None,
+                })
+                .unwrap_or_else(|| file_stem(&r.path));
+            (r.path.clone(), title)
+        })
+        .collect();
+    let doc_stems: HashMap<String, String> = ws.roots.iter().map(|r| (r.path.clone(), file_stem(&r.path))).collect();
+    let cross_anchors = if matches!(args.format, RenderFormat::Md) {
+        let doc_root_ids: Vec<strata_core::NodeId> = ws.roots.iter().filter_map(|r| r.root).collect();
+        strata_md::compute_workspace_anchors(&ws.graph, &doc_root_ids)
+    } else {
+        HashMap::new()
+    };
+
+    let outdir = args.output.clone().unwrap_or_else(|| PathBuf::from("."));
+    if let Err(e) = fs::create_dir_all(&outdir) {
+        eprintln!("Failed to create output directory {}: {}", outdir.display(), e);
+        std::process::exit(1);
+    }
+
+    for r in selected {
+        let Some(root) = r.root else {
+            eprintln!("{}: フロントマターがありません。`strata fmt` を先に実行してください。", r.path);
+            std::process::exit(2);
+        };
+        let stem = file_stem(&r.path);
+
+        let (text, warnings): (String, Vec<String>) = match args.format {
+            RenderFormat::Typst => {
+                let ctx = strata_typst::WorkspaceRenderCtx {
+                    doc_of: &doc_of,
+                    doc_titles: &doc_titles,
+                    current_doc: &r.path,
+                };
+                match strata_typst::render_to_typst_workspace_with_hide(&ws.graph, root, &stem, &args.hide, Some(ctx)) {
+                    Ok(o) => (o.text, o.warnings),
+                    Err(e) => {
+                        eprintln!("render error ({}): {}", r.path, e);
+                        std::process::exit(2);
+                    }
+                }
+            }
+            RenderFormat::Md => {
+                let ctx = strata_md::WorkspaceRenderCtx {
+                    doc_of: &doc_of,
+                    doc_stems: &doc_stems,
+                    doc_titles: &doc_titles,
+                    current_doc: &r.path,
+                    cross_anchors: &cross_anchors,
+                };
+                match strata_md::render_to_md_workspace_with_hide(&ws.graph, root, &stem, &args.hide, Some(ctx)) {
+                    Ok(o) => (o.text, o.warnings),
+                    Err(e) => {
+                        eprintln!("render error ({}): {}", r.path, e);
+                        std::process::exit(2);
+                    }
+                }
+            }
+        };
+        for w in &warnings {
+            eprintln!("{}", w);
+        }
+
+        let ext = match args.format {
+            RenderFormat::Typst => "typ",
+            RenderFormat::Md => "md",
+        };
+        let out_path = outdir.join(format!("{stem}.{ext}"));
+        if let Err(e) = write_atomic(&out_path, &text) {
+            eprintln!("Failed to write output file {}: {}", out_path.display(), e);
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(0);
+}
+
+/// メンバーの `DocRoot::path`(strata.toml からの相対パス)からファイル名 stem を
+/// 取り出す(D44: workspace render の出力ファイル名・退化テキストのフォールバック名)。
+fn file_stem(path: &str) -> String {
+    Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or(path).to_string()
 }
 
 /// `BuildError` 1件を「行:列: 種別: メッセージ」形式の行(複数になりうる)に変換する。
@@ -815,7 +1034,7 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
         E::CrossDocRef { doc, alias, span } => {
             let (line, col) = at(*span, src);
             vec![format!(
-                "{}:{}: CrossDocRef: 参照 '{}/{}' はワークスペース build(`strata build --workspace <strata.toml>`)が必要です。",
+                "{}:{}: CrossDocRef: 参照 '{}/{}' はワークスペース対応コマンド(`strata build --workspace <strata.toml>` または `strata render --workspace <strata.toml>`)が必要です。",
                 line, col, doc, alias
             )]
         }

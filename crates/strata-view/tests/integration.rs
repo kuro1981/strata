@@ -395,6 +395,145 @@ files:
     assert_eq!(yaml, "|-\n  健康状態: 良好\n\n  特技: 特になし\n");
 }
 
+/// D46: `exclude-class`/`include-only-class` は実効 class(自身+祖先の和集合)で
+/// 判定する。コンテナ(見出し)に `class=note` を1回書くだけで、その配下の子
+/// (段落・リスト)全部が note 扱いになること(コンテナ class の子への継承)。
+#[test]
+fn join_class_filter_uses_effective_class_inherited_from_container() {
+    let src = "\
+# proj {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=proj}
+
+[id=01ARZ3NDEKTSV4RRFFQ69G5FA1]
+概要の段落。
+
+[class=note]
+##### 補足まとめ {#01ARZ3NDEKTSV4RRFFQ69G5FA6}
+
+[id=01ARZ3NDEKTSV4RRFFQ69G5FA7]
+補足段落その1。
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      join:
+        of: { alias: proj }
+        separator: "\n"
+        exclude-class: note
+"#;
+    let yaml = yaml_of(src, view);
+    // note コンテナ自身(見出し)は class を直接持つので除外され、子の段落は
+    // join の直接の子ではなく見出しの子(孫)なので join のトップレベル反復には
+    // そもそも現れない。ここでは「コンテナごと除外される」ことだけを確認する。
+    assert_eq!(yaml, "概要の段落。\n");
+}
+
+/// D46 WP-Z4: `include-only-class: note` は class 一致した子が `Section`(見出し。
+/// コンテナ形式にリライトされた note)の場合、見出しテキストだけでなく配下の
+/// リスト・段落も再帰的に拾う(work_history.sml の HUMABUILD note 群リライトで
+/// 実際に踏んだ「join が見出し行だけ拾って中身を落とす」欠落を固定する回帰テスト)。
+#[test]
+fn join_include_only_class_recurses_into_a_note_container_section() {
+    let src = "\
+# proj {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=proj}
+
+[id=01ARZ3NDEKTSV4RRFFQ69G5FA1]
+概要の段落。
+
+[class=note]
+##### 補足まとめ {#01ARZ3NDEKTSV4RRFFQ69G5FA6}
+
+[id=01ARZ3NDEKTSV4RRFFQ69G5FAA]
+- 第1点 {#01ARZ3NDEKTSV4RRFFQ69G5FA7}
+- 第2点 {#01ARZ3NDEKTSV4RRFFQ69G5FA8}
+
+[id=01ARZ3NDEKTSV4RRFFQ69G5FA9]
+まとめの一文。
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      join:
+        of: { alias: proj }
+        separator: "\n"
+        include-only-class: note
+"#;
+    let yaml = yaml_of(src, view);
+    assert_eq!(yaml, "|-\n  補足まとめ\n  第1点\n  第2点\n  まとめの一文。\n");
+}
+
+// --------------------------------------------------------------------------
+// concat(D45): 複数コンビネータの文字列連結
+// --------------------------------------------------------------------------
+
+#[test]
+fn concat_joins_pick_results_with_separator() {
+    let src = "::record {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=basic-info}\n姓: 黒田\n名: 裕伸\n::\n";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      fields:
+        name:
+          concat:
+            parts:
+              - basic-info.姓
+              - basic-info.名
+            separator: " "
+"#;
+    let yaml = yaml_of(src, view);
+    assert_eq!(yaml, "name: 黒田 裕伸\n");
+}
+
+#[test]
+fn concat_default_separator_is_empty_and_accepts_literal_parts() {
+    let src = "::record {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=tech}\ndetails: Python\nlevel: 5年\n::\n";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      fields:
+        languages:
+          concat:
+            parts:
+              - tech.details
+              - literal: "\n("
+              - tech.level
+              - literal: ")"
+"#;
+    let yaml = yaml_of(src, view);
+    assert_eq!(yaml, "languages: |-\n  Python\n  (5年)\n");
+}
+
+#[test]
+fn concat_requires_at_least_one_part() {
+    let result = parse_view_def(
+        r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      concat:
+        parts: []
+"#,
+    );
+    let err = match result {
+        Ok(_) => panic!("空の concat.parts はエラーになるはず"),
+        Err(e) => e,
+    };
+    assert!(err.contains("parts"), "{err}");
+}
+
 // --------------------------------------------------------------------------
 // rows(contains) + extend-path + 別表への cell cross-reference
 // (v0 extract_companies の3方向 join 相当。会社セクション→H4子セクション→

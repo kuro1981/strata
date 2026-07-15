@@ -26,6 +26,10 @@ pub struct EvalContext<'g> {
     /// `strata_build::WorkspaceBuildOutput::doc_aliases` をそのまま借用する
     /// (WP-W3: `{ alias: X, doc: Y }` の解決に使う)。単一文書モードでは `None`。
     doc_alias_index: Option<&'g BTreeMap<String, BTreeMap<String, NodeId>>>,
+    /// D46: `contains` の子→親逆引き表(strata_core::parent_index)。`join` の
+    /// `include-only-class`/`exclude-class` を実効 class(自身+祖先の和集合)で
+    /// 判定するために使う(render --hide / context --class と同じ定義に統一)。
+    parents: HashMap<NodeId, NodeId>,
     pub touched: std::cell::RefCell<HashSet<NodeId>>,
     /// `touched` の部分集合: `{ alias: X, doc: Y }` の明示的な doc 修飾で解決した
     /// ノード(WP-W3)。`check_workspace` の「未使用ノード」走査(WP-W4 で追加)が、
@@ -49,6 +53,7 @@ impl<'g> EvalContext<'g> {
             alias_index,
             ambiguous: HashSet::new(),
             doc_alias_index: None,
+            parents: strata_core::parent_index(graph),
             touched: std::cell::RefCell::new(HashSet::new()),
             doc_qualified_touched: std::cell::RefCell::new(HashSet::new()),
             warnings: std::cell::RefCell::new(Vec::new()),
@@ -77,6 +82,7 @@ impl<'g> EvalContext<'g> {
             alias_index,
             ambiguous,
             doc_alias_index: Some(doc_aliases),
+            parents: strata_core::parent_index(graph),
             touched: std::cell::RefCell::new(HashSet::new()),
             doc_qualified_touched: std::cell::RefCell::new(HashSet::new()),
             warnings: std::cell::RefCell::new(Vec::new()),
@@ -464,6 +470,16 @@ pub fn eval(ctx: &EvalContext, scope: &Scope, comb: &Combinator) -> EvalResult<Y
             };
             cast(text, *as_type)
         }
+        // D45: parts を順に評価し、YValue::as_text() で文字列化してから separator で
+        // 連結する(実需2件: cv 氏名の姓+名結合、tech-stack の details+level 結合)。
+        Combinator::Concat { parts, separator } => {
+            let mut strs = Vec::with_capacity(parts.len());
+            for (i, part) in parts.iter().enumerate() {
+                let v = eval(ctx, scope, part).map_err(|e| format!("concat.parts[{i}]: {e}"))?;
+                strs.push(v.as_text());
+            }
+            Ok(YValue::Str(strs.join(separator)))
+        }
     }
 }
 
@@ -568,38 +584,70 @@ fn eval_join(
     let mut lines = Vec::new();
     for child in ctx.graph.children_of(node_id) {
         ctx.mark(child);
-        let cn = ctx.node(child);
-        if let Some(want) = include_only_class
-            && !cn.classes.iter().any(|c| c == want)
-        {
-            continue;
+        // D46: 実効 class(自身+祖先の和集合)で判定する — render --hide /
+        // context --class と同じ定義(strata_core::has_effective_class)に統一。
+        // コンテナ(見出し・リスト・引用)に class を1回書けば、その子ノードの
+        // join にも継承される。
+        if let Some(want) = include_only_class {
+            let tags: HashSet<&str> = std::iter::once(want).collect();
+            if !strata_core::has_effective_class(ctx.graph, &ctx.parents, child, &tags) {
+                continue;
+            }
         }
-        if let Some(deny) = exclude_class
-            && cn.classes.iter().any(|c| c == deny)
-        {
-            continue;
+        if let Some(deny) = exclude_class {
+            let tags: HashSet<&str> = std::iter::once(deny).collect();
+            if strata_core::has_effective_class(ctx.graph, &ctx.parents, child, &tags) {
+                continue;
+            }
         }
-        match &cn.payload {
-            NodePayload::List(_) => {
-                for item in ctx.graph.children_of(child) {
-                    ctx.mark(item);
-                    lines.push(text_of_node(ctx.node(item)));
-                    for sub in ctx.graph.children_of(item) {
-                        ctx.mark(sub);
-                        if let NodePayload::List(_) = &ctx.node(sub).payload {
-                            for subitem in ctx.graph.children_of(sub) {
-                                ctx.mark(subitem);
-                                let prefix = nested_prefix.unwrap_or("");
-                                lines.push(format!("{prefix}{}", text_of_node(ctx.node(subitem))));
-                            }
+        push_join_lines(ctx, child, nested_prefix, &mut lines);
+    }
+    Ok(YValue::Str(lines.join(separator)))
+}
+
+/// `join` 木モードの1ノード分をテキスト行へ再帰的に展開する。
+///
+/// D46(sml-spec.md §1.11)対応: 対象が `Section`(見出し。note コンテナ等)の場合、
+/// 見出し自身のテキストを1行足したうえで、配下の子へ**同じロジックで再帰**する
+/// (List は既存のアウトライン化、Section はさらに再帰、それ以外は1行)。
+///
+/// 背景: D46 前は note が段落ごとに `[class=note]` を繰り返す形だったため、
+/// `join`(`include-only-class: note` 等)は「対象ノードの直接の子を1行ずつ」で
+/// 全内容を拾えていた。D46 のコンテナ形式リライト(WP-Z4)後は、複数ブロックの
+/// note が「見出し+リスト+段落」という**1つの Section のサブツリー**にまとまる。
+/// この関数が無いと `text_of_node(Section)` が見出しの平文だけを返し、配下の
+/// 内容が join の出力から消える(work_history.sml の HUMABUILD note 群で実際に
+/// 発生を確認、最終報告参照)。再帰時は class フィルタを掛け直さない —
+/// コンテナが一度マッチしたら、その配下は「同じ note の一部」として丸ごと拾う
+/// (D46「コンテナに1回書けばよい」の join 版)。
+fn push_join_lines(ctx: &EvalContext, id: NodeId, nested_prefix: Option<&str>, lines: &mut Vec<String>) {
+    let node = ctx.node(id);
+    match &node.payload {
+        NodePayload::List(_) => {
+            for item in ctx.graph.children_of(id) {
+                ctx.mark(item);
+                lines.push(text_of_node(ctx.node(item)));
+                for sub in ctx.graph.children_of(item) {
+                    ctx.mark(sub);
+                    if let NodePayload::List(_) = &ctx.node(sub).payload {
+                        for subitem in ctx.graph.children_of(sub) {
+                            ctx.mark(subitem);
+                            let prefix = nested_prefix.unwrap_or("");
+                            lines.push(format!("{prefix}{}", text_of_node(ctx.node(subitem))));
                         }
                     }
                 }
             }
-            _ => lines.push(text_of_node(cn)),
         }
+        NodePayload::Section(_) => {
+            lines.push(text_of_node(node));
+            for child in ctx.graph.children_of(id) {
+                ctx.mark(child);
+                push_join_lines(ctx, child, nested_prefix, lines);
+            }
+        }
+        _ => lines.push(text_of_node(node)),
     }
-    Ok(YValue::Str(lines.join(separator)))
 }
 
 /// `Combinator::Fields`(または `Rows` の中の `Fields`)からフィールド名の列を取り出す。

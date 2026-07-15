@@ -190,10 +190,13 @@ of: self
 ## 4. コンビネータ(D32)— 値をどう整形するか
 
 固定セットのみ: **pick**・**rows**・**join**・**date**・**age**・
-**literal**・**class フィルタ**(`join` の `include-only-class`/
+**literal**・**concat**・**class フィルタ**(`join` の `include-only-class`/
 `exclude-class` として実装)。**このセット以外は実装しない** —
 足りない時は「コンビネータを1個足す裁定」か「SML 側を直す」の二択(D32)。
-`template`/`concat`(複数値の糊付け)は D35 で見送り(§7 参照)。
+`concat` は D35 で一度見送られたが、実需2件(cv 氏名の姓名結合・tech-stack の
+details+level 結合)が揃ったため D45(sml-spec.md §1.11)で採用された(§4.9)。
+文字列テンプレート式(`"{a}({b})"` のような式言語)は D45 でも不採用のまま
+(D32 の「式言語への滑り坂」原則、§7 参照)。
 
 ### 4.1 `pick` — 値をそのまま取り出す(旧称 `rename`。D35 で改名)
 
@@ -464,6 +467,51 @@ fields:
 宣言順がそのまま出力の列順になる**(決定性・可読性のため、辞書順には
 並び替えない)。
 
+### 4.9 `concat` — 複数コンビネータの文字列連結(D45)
+
+```yaml
+name:
+  concat:
+    parts:
+      - resume/basic-info.姓
+      - resume/basic-info.名
+    separator: " "
+```
+
+`parts` に列挙した**任意のコンビネータ**(pick/date/literal/concat 自身の
+入れ子も可、`alias.キー` 糖衣も可)を順に評価し、それぞれの結果を文字列化して
+`separator` で連結する。`separator` は省略すると空文字列(D45)。
+
+`literal` と組み合わせて、値と値の間に固定の記号(改行・括弧等)を挟める:
+
+```yaml
+languages:
+  concat:
+    parts:
+      - tech-stack.details # 「Python, R, SQL, ...」
+      - literal: "\n("
+      - tech-stack.level # 「Python/R: 5年（データ分析・...）...」
+      - literal: ")"
+    separator: ""
+```
+
+`cv-jis.view.yaml`(`~/dev/strata-my-resume/sml/views/`)の実例2件:
+
+- **氏名の姓名結合**(`build_cv/content/profile.yaml.fields.name`): M7 で
+  resume.sml の `::record {alias=basic-info}` に足していた冗長な `氏名` フィールド
+  (姓+名の合成テキストを SML 側に複製していた)を撤去し、`concat` で
+  `resume/basic-info.姓` + `" "`(半角スペース、既存表示と同値になるよう選んだ
+  区切り)+ `resume/basic-info.名` へ置き換えた。
+- **tech-stack の details(level) 復元**(`experience.languages`/`frameworks`/
+  `infrastructure`): v0 が `"{details}\n({level})"` で連結していたテンプレート
+  文字列を、`concat`(details の pick + `literal: "\n("` + level の pick +
+  `literal: ")"`)で宣言的に再現した。
+
+`separator` は parts 全体を貫く一様な区切りのみ(「1番目と2番目の間だけ別の
+区切り」のような per-pair 指定は無い)。そこまで凝った連結が要る場合は
+`literal` を parts に挟み込む(上記の details/level 例)か、「SML 側の構造化を
+見直す」方を検討する(D32 の原則どおり)。
+
 ## 5. profile(D34)
 
 ```yaml
@@ -538,21 +586,17 @@ notes:
   またがる合成ができる — 履歴書の氏名を職務経歴書側のビュー定義から直接引く、
   というまさにこのユースケースが受け入れ基準だった)。ただし `class`/
   `heading-text`/`alias-from-row` は doc スコープ化していない(グラフ全体対象の
-  まま、§3.1.1 末尾)。また **`context`/`render` の横断は引き続き v0.5 スコープ**
-  (sml-spec.md §1.10 D43): cross-doc 参照を含む文書は単一ファイル `render`
-  (typst/md)ができない(`CrossDocRef` エラー、WP-W1.3)— MD ページ間リンクや
-  横断近傍抽出はまだ無い。
-- **多フィールドの自由な連結(テンプレート文字列)は書けない**: `join` は
-  「1ノードの子ノード列」または「1 record のエントリ列」を連結する専用
-  コンビネータで、異なる複数のセレクタ結果を任意の文言で組み合わせる
-  (例: `"{details}\n({level})"` のような2フィールドの連結)機能は無い。
-  **`template`/`concat`(複数の named value とリテラルの糊付けを、空なら
-  省略する形で連結するコンビネータ案)は D35 で見送りが確定した**(実装しない。
-  sml-spec.md §10 の保留リストに登録済み)。D32 の「コンビネータの追加は
-  裁定を経る」運用の初適用であり、実需が具体的に出た時点で改めて裁定する
-  (cv-jis.view.yaml の `experience.languages`/`frameworks`/`infrastructure`
-  は現状 `details` のみを出し `level` を落としている — この差分がまさに
-  template/concat があれば埋まる穴で、再裁定の判断材料になる)。
+  まま、§3.1.1 末尾)。~~また `context`/`render` の横断は v0.5 スコープだった~~
+  (→ M7.5 WP-Z1 で解消。sml-spec.md §1.11 D44: `render --workspace [--doc]`・
+  `context --workspace [--doc]` を追加。MD のページ間リンクは相対 `.md` リンク+
+  アンカー、Typst は文書名付き退化テキスト。詳細は docs/workspace-m75-handoff.md)。
+- ~~**多フィールドの自由な連結(テンプレート文字列)は書けない**~~(→ D45 で
+  `concat` コンビネータを採用して解消。§4.9 参照。実需2件(cv 氏名の姓名結合・
+  tech-stack の details+level 結合)が揃ったため、D32 の「コンビネータの追加は
+  裁定を経る」運用に従って再裁定した — D35 での一度目の見送りからの方針転換)。
+  なお**文字列テンプレート式**(`"{a}({b})"` のような式言語)は D45 でも不採用の
+  まま: `concat` は「コンビネータの列を順に連結するだけ」で、式の評価・条件分岐は
+  持たない(D32「式言語への滑り坂」原則の一貫)。
 
 ## 8. 実例
 

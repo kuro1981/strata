@@ -9,7 +9,7 @@ use crate::eval::{self, EvalContext};
 use crate::manifest::Manifest;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use strata_build::{BuildOutput, WorkspaceBuildOutput};
-use strata_core::{Graph, NodeId, NodePayload};
+use strata_core::{NodeId, NodePayload};
 
 #[derive(Debug, Default)]
 pub struct CheckReport {
@@ -49,7 +49,7 @@ pub fn check(build: &BuildOutput, view: &ViewDef, manifest: &Manifest) -> CheckR
 pub fn check_workspace(ws: &WorkspaceBuildOutput, view: &ViewDef, manifest: &Manifest) -> CheckReport {
     let ctx = EvalContext::new_workspace(&ws.graph, &ws.doc_aliases);
     let mut report = check_slots_and_eval(&ctx, view, manifest);
-    let doc_of = compute_doc_ownership(&ws.graph, &ws.roots);
+    let doc_of = strata_build::doc_ownership(&ws.graph, &ws.roots);
     scan_unused_nodes(&ctx, &mut report, Some(&doc_of));
     report
 }
@@ -148,28 +148,3 @@ fn scan_unused_nodes(ctx: &EvalContext, report: &mut CheckReport, doc_of: Option
     report.unused_nodes.sort();
 }
 
-/// 各文書の `contains` 部分木を根(`DocRoot::root`)から辿り、ノード → 所属文書
-/// (`DocRoot::path`)の逆引き表を作る(ワークスペースモード専用)。alias の
-/// 有無に関わらず全ノードを対象にする(`DocRoot::path` は常に存在するため、
-/// D41 の「文書 alias 無しはエラーではない」文書も正しく分類できる — alias 表
-/// (`doc_aliases`)だけを使うより頑健)。`contains` で辿れない孤立ノード
-/// (Term 等)には所有者が付かない(この関数の呼び出し元は Table/Record/List
-/// しか見ないため実害無し)。
-fn compute_doc_ownership(graph: &Graph, roots: &[strata_build::DocRoot]) -> HashMap<NodeId, String> {
-    let mut owner: HashMap<NodeId, String> = HashMap::new();
-    for r in roots {
-        let Some(root_id) = r.root else { continue };
-        owner.entry(root_id).or_insert_with(|| r.path.clone());
-        let mut stack = vec![root_id];
-        while let Some(id) = stack.pop() {
-            for child in graph.children_of(id) {
-                if owner.contains_key(&child) {
-                    continue;
-                }
-                owner.insert(child, r.path.clone());
-                stack.push(child);
-            }
-        }
-    }
-    owner
-}

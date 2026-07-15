@@ -462,6 +462,7 @@ dependencies = [
  "serde_json",
  "strata-build",
  "strata-context",
+ "strata-core",
  "strata-md",
  "strata-sml",
  "strata-typst",

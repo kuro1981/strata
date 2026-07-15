@@ -1,28 +1,71 @@
 //! 3スコープ(D36)の Markdown 組み立て本体。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use strata_core::{Figure, Graph, NodeId, NodePayload};
 
 use crate::addr::{address_tag, short_address};
 use crate::inline::{render_inlines_md, render_math_text};
 use crate::label::{cell_value_text, node_short_label};
-use crate::{ContextError, ancestor_path, is_semantic, nodes_with_class, parent_index, rel_str, semantic_neighbors, subtree_ids};
+use crate::{ContextError, ancestor_path, class_chunk_roots, is_semantic, rel_str, semantic_neighbors, subtree_ids};
 
-/// ブロックの描画モード。`Full` は `contains` を最後まで辿る(全文書 / node チャンク)。
-/// `Leaf` はそのブロック自身の内容だけを描く(class 横断列挙 — D23 の「class はブロック
-/// 単位」に合わせ、子孫ブロックを勝手に道連れにしない裁量)。`List` の直接の項目だけは
-/// どちらのモードでも描く(項目列挙自体がリストというブロックの中身のため)。
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RenderMode {
-    Full,
-    Leaf,
-}
+// D46(sml-spec.md §1.11): `render_block` は常に `contains` を最後まで辿ってブロックの
+// サブツリー全体を描く(旧 `RenderMode::Leaf`=子孫を描かない縮退モードは廃止)。
+// `--class` スコープは `class_chunk_roots` が「実効 class が一致する chunk の根」だけを
+// 選んだ上でこの関数に渡すため、根のサブツリーを丸ごと描画すれば子の重複列挙は
+// 起きない(コンテナに1回 class を書けばよい、D46 の核心)。
 
 // --- スコープ1: 全文書 -----------------------------------------------------------
 
 pub(crate) fn render_document_scope(graph: &Graph, root: NodeId) -> Result<String, ContextError> {
     let mut out = String::new();
+    render_document_body(graph, root, &mut out)?;
+
+    // D36 形式要件: 全ブロックノードが ULID でアドレス可能。`contains` で document から
+    // 到達できないノード(Term は用語使用側からしか辿れず、contains を持たない)を
+    // 「その他のノード」として末尾に列挙し、抜け漏れを無くす。
+    let visited: HashSet<NodeId> = subtree_ids(graph, root).into_iter().collect();
+    render_orphans_and_edges(graph, &visited, &HashSet::new(), &mut out);
+    Ok(out)
+}
+
+/// D44(sml-spec.md §1.11): `context --workspace` の無指定(全メンバー)/`--doc` 絞り込み
+/// スコープ。各文書の本文を `---` 区切りで連結し、「その他のノード」「エッジ」節は
+/// ワークスペース全体で1回だけ出す(`render_document_scope` を文書ごとに単純に
+/// 繰り返すと、共有グラフの意味エッジ一覧が文書数ぶん重複してしまうため)。
+/// `all_doc_owned`: ワークスペース全体(`--doc` で絞り込む前の全メンバー)の
+/// `contains` サブツリーに属する全ノードの集合(`strata_build::doc_ownership` の
+/// キー集合)。`--doc` で1文書に絞り込んだ場合、選ばれなかった他文書のノードは
+/// 「その他のノード」(真の孤立ノード向けの節)に紛れ込ませない・意味エッジ一覧も
+/// 選択文書に無関係な行を出さないための除外集合として使う(裁量: 単なる「全ノード
+/// 走査」だと `--doc` の絞り込み効果がその2節だけ効かなくなり、混乱を招くため)。
+pub(crate) fn render_workspace_document_scope(
+    graph: &Graph,
+    roots: &[(String, NodeId)],
+    all_doc_owned: &HashSet<NodeId>,
+) -> Result<String, ContextError> {
+    let mut out = String::new();
+    let mut visited: HashSet<NodeId> = HashSet::new();
+    for (i, (path, root)) in roots.iter().enumerate() {
+        if i > 0 {
+            out.push_str("---\n\n");
+        }
+        // D44 裁量: 複数文書を1つの出力に連結する際、どの文書の本文かを見出しの前に
+        // 明示する(単一文書スコープには無い要素だが、workspace スコープでは「chunk の
+        // 位置文脈に文書名を含める」という WP-Z1 の要求に沿う)。
+        out.push_str(&format!("_(文書ファイル: {path})_\n\n"));
+        render_document_body(graph, *root, &mut out)?;
+        visited.extend(subtree_ids(graph, *root));
+    }
+    let excluded: HashSet<NodeId> = all_doc_owned.difference(&visited).copied().collect();
+    render_orphans_and_edges(graph, &visited, &excluded, &mut out);
+    Ok(out)
+}
+
+/// 1文書の本文(タイトル見出し+`contains` サブツリー全体)を描画する。全文書
+/// スコープ(`render_document_scope`)とワークスペース版
+/// (`render_workspace_document_scope`)が共有する(D44 でのリファクタ抽出)。
+fn render_document_body(graph: &Graph, root: NodeId, out: &mut String) -> Result<(), ContextError> {
     let root_node = graph.nodes.get(&root).ok_or(ContextError::NoRoot)?;
     // D21 と同じ3段フォールバック(Document.title → 最初の H1 → 無題)を踏襲する(裁量:
     // strata-typst の `first_h1_title` と同じ運用に揃え、タイトルの見え方を一致させる)。
@@ -33,14 +76,20 @@ pub(crate) fn render_document_scope(graph: &Graph, root: NodeId) -> Result<Strin
     out.push_str(&format!("# {} {}\n\n", title, address_tag(root, root_node)));
 
     for child in graph.children_of(root) {
-        render_block(graph, child, 1, &mut out, RenderMode::Full);
+        render_block(graph, child, 1, out);
     }
+    Ok(())
+}
 
-    // D36 形式要件: 全ブロックノードが ULID でアドレス可能。`contains` で document から
-    // 到達できないノード(Term は用語使用側からしか辿れず、contains を持たない)を
-    // 「その他のノード」として末尾に列挙し、抜け漏れを無くす。
-    let visited: HashSet<NodeId> = subtree_ids(graph, root).into_iter().collect();
-    let orphans: Vec<NodeId> = graph.nodes.keys().copied().filter(|id| !visited.contains(id)).collect();
+/// 「その他のノード」節(D36 形式要件: 全ブロックが ULID アドレス可能)+「エッジ」節
+/// (意味エッジ一覧)。`visited` は「本文にすでに現れたノード」の集合(単一文書なら
+/// その文書の contains サブツリー、ワークスペースなら全文書分の和集合)。`excluded`
+/// は「選択スコープ外の他文書のノード」(D44 `--doc` 絞り込み専用。単一文書
+/// スコープでは常に空集合)— 「その他のノード」に他文書の内容を紛れ込ませず、
+/// 「エッジ」も選択スコープに無関係な行(両端が excluded 側)を出さない。
+fn render_orphans_and_edges(graph: &Graph, visited: &HashSet<NodeId>, excluded: &HashSet<NodeId>, out: &mut String) {
+    let orphans: Vec<NodeId> =
+        graph.nodes.keys().copied().filter(|id| !visited.contains(id) && !excluded.contains(id)).collect();
     if !orphans.is_empty() {
         out.push_str("## その他のノード\n\n");
         out.push_str("(本文の contains 構造には現れないが、意味エッジ経由で参照されうるノード。例: term)\n\n");
@@ -52,7 +101,11 @@ pub(crate) fn render_document_scope(graph: &Graph, root: NodeId) -> Result<Strin
     }
 
     out.push_str("## エッジ\n\n");
-    let semantic_edges: Vec<_> = graph.edges.iter().filter(|e| is_semantic(e.rel)).collect();
+    let semantic_edges: Vec<_> = graph
+        .edges
+        .iter()
+        .filter(|e| is_semantic(e.rel) && (excluded.is_empty() || visited.contains(&e.from) || visited.contains(&e.to)))
+        .collect();
     if semantic_edges.is_empty() {
         out.push_str("(意味エッジなし)\n");
     } else {
@@ -70,8 +123,6 @@ pub(crate) fn render_document_scope(graph: &Graph, root: NodeId) -> Result<Strin
             ));
         }
     }
-
-    Ok(out)
 }
 
 // --- スコープ2: --node + --hops --------------------------------------------------
@@ -93,7 +144,7 @@ pub(crate) fn render_node_scope(graph: &Graph, ids: &[NodeId], hops: u32) -> Res
         if i > 0 {
             out.push_str("---\n\n");
         }
-        render_block(graph, id, 1, &mut out, RenderMode::Full);
+        render_block(graph, id, 1, &mut out);
     }
 
     let neighbors = semantic_neighbors(graph, &chunk_ids, hops);
@@ -101,7 +152,7 @@ pub(crate) fn render_node_scope(graph: &Graph, ids: &[NodeId], hops: u32) -> Res
     if neighbors.is_empty() {
         out.push_str("(近傍ノードなし)\n");
     } else {
-        let parents = parent_index(graph);
+        let parents = strata_core::parent_index(graph);
         for (nid, rels) in &neighbors {
             let Some(n) = graph.nodes.get(nid) else { continue };
             let rel_desc = rels
@@ -128,9 +179,11 @@ pub(crate) fn render_class_scope(graph: &Graph, tag: &str, root: Option<NodeId>)
     let mut out = String::new();
     out.push_str(&format!("# Context: --class {tag}\n\n"));
 
+    let parents = strata_core::parent_index(graph);
     let doc_order = root.map(|r| subtree_ids(graph, r));
-    let matches = nodes_with_class(graph, tag, doc_order.as_deref());
-    render_class_matches(graph, &matches, &mut out);
+    let roots = class_chunk_roots(graph, tag, &parents, None);
+    let ordered = order_ids(&roots, doc_order.as_deref());
+    render_class_matches(graph, &parents, &ordered, &mut out);
     Ok(out)
 }
 
@@ -152,22 +205,39 @@ pub(crate) fn render_node_and_class_scope(graph: &Graph, ids: &[NodeId], tag: &s
             }
         }
     }
-    let matches = nodes_with_class(graph, tag, Some(&scope_ids));
-    render_class_matches(graph, &matches, &mut out);
+    let scope_set: HashSet<NodeId> = scope_ids.iter().copied().collect();
+    let parents = strata_core::parent_index(graph);
+    let roots = class_chunk_roots(graph, tag, &parents, Some(&scope_set));
+    let ordered = order_ids(&roots, Some(&scope_ids));
+    render_class_matches(graph, &parents, &ordered, &mut out);
     Ok(out)
 }
 
-fn render_class_matches(graph: &Graph, matches: &[(&NodeId, &strata_core::Node)], out: &mut String) {
-    if matches.is_empty() {
+/// `ids` を `doc_order`(文書順)があればその順で、無ければ `NodeId` 昇順で並べる。
+fn order_ids(ids: &HashSet<NodeId>, doc_order: Option<&[NodeId]>) -> Vec<NodeId> {
+    match doc_order {
+        Some(order) => order.iter().copied().filter(|id| ids.contains(id)).collect(),
+        None => {
+            let mut v: Vec<NodeId> = ids.iter().copied().collect();
+            v.sort();
+            v
+        }
+    }
+}
+
+/// D46: `class_chunk_roots` が選んだ chunk の根を、各々サブツリーごと(`render_block` は
+/// 常に `contains` を最後まで辿る)描画する。コンテナ(見出し・リスト・引用)に class を
+/// 1回書けば、配下の子は根の描画に含まれて自動的に出る(子を重複列挙しない)。
+fn render_class_matches(graph: &Graph, parents: &HashMap<NodeId, NodeId>, ids: &[NodeId], out: &mut String) {
+    if ids.is_empty() {
         out.push_str("(該当ブロックなし)\n");
         return;
     }
-    let parents = parent_index(graph);
-    for (id, _node) in matches {
-        let path = ancestor_path(graph, &parents, **id);
+    for &id in ids {
+        let path = ancestor_path(graph, parents, id);
         let loc = if path.is_empty() { "(位置不明)".to_string() } else { path.join(" > ") };
         out.push_str(&format!("位置: {loc}\n\n"));
-        render_block(graph, **id, 1, out, RenderMode::Leaf);
+        render_block(graph, id, 1, out);
     }
 }
 
@@ -184,7 +254,7 @@ fn first_h1_title(graph: &Graph, root: NodeId) -> Option<String> {
 
 // --- ブロック描画本体 --------------------------------------------------------------
 
-fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode: RenderMode) {
+fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String) {
     let Some(node) = graph.nodes.get(&id) else { return };
     let tag = address_tag(id, node);
 
@@ -192,10 +262,8 @@ fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode:
         NodePayload::Section(s) => {
             let level = "#".repeat((depth + 1).min(6));
             out.push_str(&format!("{level} {} {tag}\n\n", render_inlines_md(graph, &s.heading)));
-            if mode == RenderMode::Full {
-                for child in graph.children_of(id) {
-                    render_block(graph, child, depth + 1, out, mode);
-                }
+            for child in graph.children_of(id) {
+                render_block(graph, child, depth + 1, out);
             }
         }
         NodePayload::Para(p) => {
@@ -204,7 +272,7 @@ fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode:
         NodePayload::List(l) => {
             let _ = l;
             out.push_str(&format!("リスト {tag}\n\n"));
-            render_list_items(graph, id, 0, out, mode);
+            render_list_items(graph, id, 0, out);
             out.push('\n');
         }
         NodePayload::Table(t) => {
@@ -249,10 +317,8 @@ fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode:
         // M6(D40): blockquote — Markdown の `>` 記法を模した見出し行 + 子ブロック展開。
         NodePayload::Quote(_) => {
             out.push_str(&format!("引用 {tag}\n\n"));
-            if mode == RenderMode::Full {
-                for child in graph.children_of(id) {
-                    render_block(graph, child, depth, out, mode);
-                }
+            for child in graph.children_of(id) {
+                render_block(graph, child, depth, out);
             }
         }
         // M6(D40): 水平線。
@@ -262,7 +328,7 @@ fn render_block(graph: &Graph, id: NodeId, depth: usize, out: &mut String, mode:
     }
 }
 
-fn render_list_items(graph: &Graph, list_id: NodeId, indent: usize, out: &mut String, mode: RenderMode) {
+fn render_list_items(graph: &Graph, list_id: NodeId, indent: usize, out: &mut String) {
     let (ordered, start) = match graph.nodes.get(&list_id).map(|n| &n.payload) {
         Some(NodePayload::List(l)) => (l.ordered, l.start),
         _ => (false, None),
@@ -285,11 +351,9 @@ fn render_list_items(graph: &Graph, list_id: NodeId, indent: usize, out: &mut St
                     None => "",
                 };
                 out.push_str(&format!("{pad}{marker} {check}{} {tag}\n", render_inlines_md(graph, &p.inline)));
-                if mode == RenderMode::Full {
-                    for sub_id in graph.children_of(child_id) {
-                        if let Some(NodePayload::List(_)) = graph.nodes.get(&sub_id).map(|n| &n.payload) {
-                            render_list_items(graph, sub_id, indent + 1, out, mode);
-                        }
+                for sub_id in graph.children_of(child_id) {
+                    if let Some(NodePayload::List(_)) = graph.nodes.get(&sub_id).map(|n| &n.payload) {
+                        render_list_items(graph, sub_id, indent + 1, out);
                     }
                 }
             }

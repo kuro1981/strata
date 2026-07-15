@@ -657,3 +657,27 @@ fn ref_without_text_to_hidden_node_uses_short_fallback() {
     assert!(out.text.contains("(非表示)"), "{}", out.text);
     assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
 }
+
+/// D46: 実効 class(自身+祖先の和集合)を strata-core の共有ヘルパへ一本化した後も、
+/// 「コンテナに class を1回書けばサブツリー全体が --hide の対象になる」という
+/// D23 の既存契約が保たれること(3階層: Section → List → 項目Para、strata-typst の
+/// 同名テストと対で固定する)。
+#[test]
+fn hide_inherits_through_multiple_container_levels_class_on_top_only() {
+    let doc_id = NodeId::new();
+    let sec_id = NodeId::new();
+    let list_id = NodeId::new();
+    let item_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(doc_id, NodePayload::Document(Document { title: None })));
+    g.insert(classed(sec(sec_id, "面接メモ"), vec!["note"]));
+    g.insert(Node::new(list_id, NodePayload::List(List { ordered: false, start: None })));
+    g.insert(para(item_id, vec![Inline::Text { s: "深いネストの補足項目".into() }]));
+    g.link(doc_id, Rel::Contains, sec_id, Some(0));
+    g.link(sec_id, Rel::Contains, list_id, Some(0));
+    g.link(list_id, Rel::Contains, item_id, Some(0));
+
+    let out = render_to_md_with_hide(&g, doc_id, "fallback", &["note".to_string()]).unwrap();
+    assert!(!out.text.contains("面接メモ"), "{}", out.text);
+    assert!(!out.text.contains("深いネストの補足項目"), "コンテナの class が孫リスト項目まで継承されるはず: {}", out.text);
+}

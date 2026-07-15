@@ -11,6 +11,11 @@ pub fn bin() -> &'static str {
 }
 
 /// リポジトリルート(crates/strata-cli の2つ上)。fixture 参照に使う。
+/// `mod common` は各統合テストバイナリ(`tests/*.rs` はそれぞれ独立クレート)に
+/// 個別コンパイルされるため、fixture 参照を使わないバイナリ(例: workspace_cli.rs、
+/// 合成ワークスペースのみを扱い docs/ の固定 fixture には依存しない)ではこの関数が
+/// 未使用になる。共有ヘルパファイルの性質上そちらは正当な未使用なので許容する。
+#[allow(dead_code)]
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().expect("repo root exists")
 }

@@ -242,6 +242,9 @@ pub struct RawCombinatorFields {
     /// D35: 旧名 `rename` を `pick` に改名(実態は値の抽出でありリネームではない)。
     #[serde(default)]
     pub pick: Option<RawPick>,
+    /// D45: 複数コンビネータの文字列連結(D35 で見送られた `concat` の再裁定)。
+    #[serde(default)]
+    pub concat: Option<RawConcat>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -349,6 +352,13 @@ impl RawCombinatorFields {
         }
         take!(self.pick, |v: RawPick| -> DefResult<Combinator> {
             Ok(Combinator::Pick { of: v.of.into_ast()?, as_type: parse_as(v.r#as)? })
+        });
+        take!(self.concat, |v: RawConcat| -> DefResult<Combinator> {
+            let parts = v.parts.into_iter().map(RawCombinator::into_ast).collect::<DefResult<Vec<_>>>()?;
+            if parts.is_empty() {
+                return Err("concat.parts は最低1件必要です".to_string());
+            }
+            Ok(Combinator::Concat { parts, separator: v.separator.unwrap_or_default() })
         });
         match count {
             1 => Ok(result.unwrap()),
@@ -496,4 +506,15 @@ pub struct RawPick {
     pub of: RawSelector,
     #[serde(default)]
     pub r#as: Option<String>,
+}
+
+/// D45: `concat: { parts: [<コンビネータ...>], separator: "" }`。`parts` は
+/// `RawCombinator` の列(kitchen sink の入れ子。糖衣文字列 `alias.キー` もそのまま
+/// 各要素に書ける)。`separator` 省略時は空文字列(sml-spec.md §1.11 D45)。
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawConcat {
+    pub parts: Vec<RawCombinator>,
+    #[serde(default)]
+    pub separator: Option<String>,
 }

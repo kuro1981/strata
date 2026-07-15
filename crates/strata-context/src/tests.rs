@@ -198,3 +198,64 @@ fn node_and_class_scope_intersects_to_only_matches_within_the_node_subtree() {
     assert!(out.contains("補足A"), "章A のサブツリー内の note は出る");
     assert!(!out.contains("補足B"), "章B のサブツリー外の note は出ない(AND 判定)");
 }
+
+// --- D46: 実効 class(コンテナへの継承・chunk 化) -------------------------------------
+
+/// コンテナ(見出し)に `class=note` を1回だけ書けば、配下の複数段落・ネストリストが
+/// 全部 note 扱いになる(実効 class = 自身+祖先の和集合)。かつ「位置:」の出現は
+/// コンテナ1回だけ(子を重複列挙しない、D46 の核心)。
+const CONTAINER_CLASS_FIXTURE: &str = "---\n\
+id: 01HZZZZZZZZZZZZZZZZZZZZZZ0\n\
+---\n\
+\n\
+# 文書 {#01HZZZZZZZZZZZZZZZZZZZZZZ1}\n\
+\n\
+## プロジェクト {#01HZZZZZZZZZZZZZZZZZZZZZZ2}\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ3]\n\
+概要の段落。\n\
+\n\
+[class=note]\n\
+##### 補足まとめ {#01HZZZZZZZZZZZZZZZZZZZZZZ4}\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ5]\n\
+補足段落その1。\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ6]\n\
+- 内訳その1 {#01HZZZZZZZZZZZZZZZZZZZZZZ7}\n\
+- 内訳その2 {#01HZZZZZZZZZZZZZZZZZZZZZZ8}\n";
+
+#[test]
+fn class_scope_treats_container_with_class_as_a_single_chunk_covering_all_descendants() {
+    let build = strata_build::build(CONTAINER_CLASS_FIXTURE).unwrap();
+    let opts = ContextOptions { nodes: vec![], hops: 1, class: Some("note".to_string()) };
+    let out = render_context(&build, &opts).unwrap();
+
+    // 本文の欠落ゼロ: コンテナ自身(見出し)+配下の段落+ネストリスト項目が
+    // 全部カバーされていること。
+    assert!(out.contains("補足まとめ"));
+    assert!(out.contains("補足段落その1"));
+    assert!(out.contains("内訳その1"));
+    assert!(out.contains("内訳その2"));
+    // 直接 class を持たない兄弟(概要の段落)は出ない。
+    assert!(!out.contains("概要の段落"));
+
+    // 子を重複列挙しない: 「位置:」の出現はコンテナ1回だけ(段落・リストごとに
+    // 繰り返されない)。
+    let loc_count = out.matches("位置:").count();
+    assert_eq!(loc_count, 1, "chunk の根(コンテナ)1回だけのはず:\n{out}");
+}
+
+/// render --hide とのサブツリー非表示の同値性(D46): コンテナに class を付けると、
+/// context --class は子ノードを個別 class 付与と同じ内容カバレッジで拾える
+/// (「コンテナ class 継承」が render --hide のサブツリー隠蔽と同じ実効 class 定義を
+/// 共有していることの間接的な確認 — render 側の同値性は strata-typst/strata-md の
+/// テストで直接固定する)。
+#[test]
+fn class_scope_container_chunking_is_deterministic() {
+    let build = strata_build::build(CONTAINER_CLASS_FIXTURE).unwrap();
+    let opts = ContextOptions { nodes: vec![], hops: 1, class: Some("note".to_string()) };
+    let a = render_context(&build, &opts).unwrap();
+    let b = render_context(&build, &opts).unwrap();
+    assert_eq!(a, b);
+}
