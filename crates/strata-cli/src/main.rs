@@ -22,6 +22,9 @@ enum Command {
     Build(BuildArgs),
     /// Render an SML file into Typst markup (build + render, no intermediate JSON)
     Render(RenderArgs),
+    /// Apply a declarative view definition to an SML file's canonical graph,
+    /// producing template-consumable data files (YAML). See docs/view-def-v1.md.
+    View(ViewArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -59,13 +62,163 @@ struct RenderArgs {
     hide: Vec<String>,
 }
 
+#[derive(ClapArgs, Debug)]
+struct ViewArgs {
+    /// SML file to build and apply the view definition to
+    file: PathBuf,
+
+    /// View definition YAML (D30〜D34, docs/view-def-v1.md)
+    #[arg(long = "view")]
+    view: PathBuf,
+
+    /// Directory that output file paths (declared in the view definition) are
+    /// relative to. Defaults to the current directory.
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Restrict output to files tagged for this profile (D34). Omit to emit
+    /// every file the view definition declares (union of all profiles) —
+    /// this is what a template build that reads multiple profile-specific
+    /// files (e.g. submit/check) in one pass needs.
+    #[arg(long)]
+    profile: Option<String>,
+
+    /// Dry-run: report unfulfilled manifest slots and unused graph nodes
+    /// instead of writing files (D33). Requires the view definition to
+    /// declare a `manifest:` path.
+    #[arg(long)]
+    check: bool,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
         Command::Fmt(fmt_args) => run_fmt(fmt_args),
         Command::Build(build_args) => run_build(build_args),
         Command::Render(render_args) => run_render(render_args),
+        Command::View(view_args) => run_view(view_args),
     }
+}
+
+/// `strata-cli view` サブコマンド(D30/D33、docs/view-v1-handoff.md WP-W2)。
+///
+/// 内部で `strata_build::build` → `strata_view::apply`(または `--check` なら
+/// `strata_view::check`)を呼ぶ。exit code は他コマンドと同じ 0/1/2 の慣習:
+/// 2 = SML/ビュー定義/マニフェストを読めない・パースできない(全か無か)、
+/// 1 = 書き込み失敗、または `--check` で診断あり、0 = 成功/診断なし。
+/// Warning は stderr に出しつつ exit 0(D17 と同じ扱い)。
+fn run_view(args: ViewArgs) {
+    let src = match fs::read_to_string(&args.file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let view_src = match fs::read_to_string(&args.view) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read view definition file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let out = match strata_build::build(&src) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    print_warnings(&out.warnings, &src);
+
+    let view = match strata_view::parse_view_def(&view_src) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("-:-: ViewDefError: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    if args.check {
+        run_view_check(&out, &view, &args);
+        return;
+    }
+
+    let profile = args.profile.as_deref();
+    let (files, warnings) = match strata_view::apply(&out, &view, profile) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("-:-: ViewError: {}", e);
+            std::process::exit(2);
+        }
+    };
+    for w in &warnings {
+        eprintln!("-:-: warning: View: {}", w);
+    }
+
+    let outdir = args.output.unwrap_or_else(|| PathBuf::from("."));
+    for f in &files {
+        let path = outdir.join(&f.path);
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            eprintln!("Failed to create output directory {}: {}", parent.display(), e);
+            std::process::exit(1);
+        }
+        if let Err(e) = write_atomic(&path, &f.yaml) {
+            eprintln!("Failed to write output file {}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(0);
+}
+
+/// `--check`(D33)の dry-run 診断。view 定義の `manifest:` を(view ファイル自身の
+/// ディレクトリを基準に)解決して読み込み、`strata_view::check` の結果を
+/// 「-:-: 種別: メッセージ」形式で全件 stderr に出す。診断が1件でもあれば exit 1。
+fn run_view_check(out: &strata_build::BuildOutput, view: &strata_view::ViewDef, args: &ViewArgs) {
+    let Some(manifest_rel) = &view.manifest else {
+        eprintln!("-:-: ViewDefError: --check にはビュー定義の `manifest:` 宣言が必要です。");
+        std::process::exit(2);
+    };
+    let manifest_path = args.view.parent().unwrap_or_else(|| Path::new(".")).join(manifest_rel);
+    let manifest_src = match fs::read_to_string(&manifest_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read manifest file {}: {}", manifest_path.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let manifest = match strata_view::parse_manifest(&manifest_src) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("-:-: ManifestError: {}", e);
+            std::process::exit(2);
+        }
+    };
+
+    let report = strata_view::check(out, view, &manifest);
+    for w in &report.warnings {
+        eprintln!("-:-: warning: View: {}", w);
+    }
+    for e in &report.eval_errors {
+        eprintln!("-:-: EvalError: {}", e);
+    }
+    for m in &report.missing_slots {
+        eprintln!("-:-: MissingSlot: {}", m);
+    }
+    for u in &report.unused_nodes {
+        eprintln!("-:-: UnusedNode: {}", u);
+    }
+
+    std::process::exit(if report.is_clean() { 0 } else { 1 });
 }
 
 /// `strata-cli fmt` サブコマンド(docs/sml-fmt-m2-handoff.md D-F4)。

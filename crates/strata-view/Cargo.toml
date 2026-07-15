@@ -1,0 +1,13 @@
+[package]
+name = "strata-view"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+strata-core = { path = "../strata-core" }
+strata-build = { path = "../strata-build" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# serde_yaml は非保守(2024年公式アーカイブ)。ドロップイン API 互換の
+# コミュニティ後継 serde_yaml_ng を採用(裁量。最終報告参照)。
+serde_yaml_ng = "0.10"
