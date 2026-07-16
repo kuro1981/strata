@@ -106,7 +106,11 @@ export function cellKey(rowPath: string[], colPath: string[]): string {
   return `${rowPath.join("␟")}|${colPath.join("␟")}`;
 }
 
-export function cellValueToText(v: CellValue | undefined): string {
+/** `k: "ref"` セルの表示テキストを解決する。省略時は ULID をそのまま出す(呼び出し側が
+ * グラフ索引を持たない文脈向けの後方互換フォールバック)。G1.7: 通常は
+ * `BlockTree.tsx` から `deriveLabel` ベースの resolver を渡し、生の ULID が
+ * 表に漏れないようにする(人間可読ラベルが主表示・raw ID の露出はここも対象)。 */
+export function cellValueToText(v: CellValue | undefined, resolveRef?: (id: string) => string): string {
   if (!v) return "";
   switch (v.k) {
     case "number":
@@ -114,7 +118,7 @@ export function cellValueToText(v: CellValue | undefined): string {
     case "text":
       return v.v;
     case "ref":
-      return `→${v.to}`;
+      return `→${resolveRef ? resolveRef(v.to) : v.to}`;
     case "empty":
       return "";
     case "quantity":

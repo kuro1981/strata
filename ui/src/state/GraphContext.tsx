@@ -10,11 +10,19 @@
 // - class トグルは `hiddenClasses`(OFF にした class の集合)を持ち、
 //   `isHidden(id)` は D46 の実効 class(自身+祖先)がそれと交差するかで判定する
 //   (祖先ごと消える = サブツリーごと消える)。
+// - D51(G1.5): グラフペインの詳細度は `graphMode`(local/overview/outline)。
+//   `local` は選択中心の近傍グラフで `localHops`(1〜2)まで辿る。モード・ホップ数の
+//   状態もここに集約し、GraphPane.tsx から参照する(class トグルと同じ理由: 将来
+//   他コンポーネントから参照する可能性に備える)。
 
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import type { NodeId } from "@/types/graph";
 import { buildIndex, effectiveClasses, resolveJumpTarget, type GraphIndex } from "@/lib/graphIndex";
 import type { GraphJson } from "@/types/graph";
+
+/** グラフペインの詳細度(D51 G1.5)。既定は `local`(ローカルグラフ)。
+ * `overview` はセクション粒度、`outline` は旧来の全展開(オプションに降格)。 */
+export type GraphMode = "local" | "overview" | "outline";
 
 interface GraphContextValue {
   idx: GraphIndex;
@@ -28,6 +36,12 @@ interface GraphContextValue {
   registerBlockRef: (id: NodeId, el: HTMLElement | null) => void;
   jumpError: string | null;
   jump: (query: string) => void;
+  /** D51: グラフペインの詳細度モード。 */
+  graphMode: GraphMode;
+  setGraphMode: (mode: GraphMode) => void;
+  /** D51: ローカルグラフのホップ数(1〜2、トグル)。 */
+  localHops: 1 | 2;
+  setLocalHops: (hops: 1 | 2) => void;
 }
 
 const GraphContext = createContext<GraphContextValue | null>(null);
@@ -44,6 +58,8 @@ export function GraphProvider({ graph, children }: { graph: GraphJson; children:
   const [activeDoc, setActiveDocState] = useState<string | null>(idx.roots[0]?.path ?? null);
   const [hiddenClasses, setHiddenClasses] = useState<Set<string>>(new Set());
   const [jumpError, setJumpError] = useState<string | null>(null);
+  const [graphMode, setGraphMode] = useState<GraphMode>("local");
+  const [localHops, setLocalHops] = useState<1 | 2>(1);
   const blockRefs = useRef(new Map<NodeId, HTMLElement>());
 
   const hiddenNodeIds = useMemo(() => {
@@ -133,6 +149,10 @@ export function GraphProvider({ graph, children }: { graph: GraphJson; children:
     registerBlockRef,
     jumpError,
     jump,
+    graphMode,
+    setGraphMode,
+    localHops,
+    setLocalHops,
   };
 
   return <GraphContext.Provider value={value}>{children}</GraphContext.Provider>;

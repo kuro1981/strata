@@ -4,6 +4,7 @@
 
 import { useGraph } from "@/state/GraphContext";
 import { BlockTree, OrphanNodeCard } from "@/components/blocks/BlockTree";
+import { docRootLabel } from "@/lib/label";
 import { cn } from "@/lib/utils";
 
 export function DocumentPane() {
@@ -39,7 +40,7 @@ export function DocumentPane() {
               )}
               title={r.path}
             >
-              {r.alias ?? r.path}
+              {docRootLabel(idx, r)}
             </button>
           ))}
         </div>

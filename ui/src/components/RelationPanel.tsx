@@ -4,7 +4,7 @@
 
 import type { Edge, NodeId } from "@/types/graph";
 import { useGraph } from "@/state/GraphContext";
-import { deriveLabel, typeLabel } from "@/lib/label";
+import { ALIAS_BADGE_CLASS, deriveLabel, typeLabel } from "@/lib/label";
 import { relStyle } from "@/lib/relStyle";
 import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -63,6 +63,10 @@ function RelationRow({
   const { idx } = useGraph();
   const node = idx.nodes.get(other);
   const style = relStyle(edge.rel);
+  const label = node ? deriveLabel(node) : other;
+  // G1.7 方針2: alias バッジは「関係パネルの行」に限定して出す1形式。ラベル自体が
+  // 既に alias にフォールバックしている(テキストが空のノード)場合は重複させない。
+  const showAliasBadge = node?.alias && node.alias !== label;
   return (
     <button
       type="button"
@@ -74,7 +78,8 @@ function RelationRow({
       <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px]">
         {edge.rel}
       </Badge>
-      <span className="truncate">{node ? deriveLabel(node) : other}</span>
+      <span className="truncate">{label}</span>
+      {showAliasBadge && <span className={`shrink-0 ${ALIAS_BADGE_CLASS}`}>#{node!.alias}</span>}
       {node && <span className="shrink-0 text-muted-foreground">({typeLabel(node.type)})</span>}
     </button>
   );

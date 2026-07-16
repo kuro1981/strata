@@ -10,7 +10,10 @@ export interface RelStyle {
 }
 
 const KNOWN_STYLE: Record<KnownRel, RelStyle> = {
-  contains: { color: "#94a3b8" }, // 使わない(構造は位置で表現する)が型のため定義
+  // outline/overview では構造は位置で表現するため使わないが、local グラフは G1.6 で
+  // contains の隣接(親・子・兄弟)も描くようになったため、薄いグレー破線として使う
+  // (意味エッジと視覚的に区別するための裁量配色)。
+  contains: { color: "#cbd5e1", dash: "3 3" },
   supports: { color: "#16a34a" }, // 緑: 論拠
   "depends-on": { color: "#2563eb" }, // 青: 依存
   "refers-to": { color: "#f59e0b", dash: "4 3" }, // 橙・破線: 弱いナビゲーション参照

@@ -9,7 +9,7 @@ import { useGraph } from "@/state/GraphContext";
 import { InlineList, MathInline } from "@/components/Inline";
 import { Badge } from "@/components/ui/badge";
 import { RelationDegreeBadge, RelationPanel } from "@/components/RelationPanel";
-import { typeLabel } from "@/lib/label";
+import { ALIAS_BADGE_CLASS, deriveLabel, documentTitle, typeLabel } from "@/lib/label";
 import {
   buildHeaderTree,
   cellKey,
@@ -44,8 +44,10 @@ export function OrphanNodeCard({ id }: { id: NodeId }) {
       ref={(el) => registerBlockRef(id, el)}
       className="mb-3 rounded-md border border-dashed border-amber-400/60 bg-amber-50/60 px-3 py-2 dark:bg-amber-950/30"
     >
-      <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-        文書外のノード({typeLabel(node.type)}) — term 宣言のように文書構造の外から参照専用で存在する
+      <div className="mb-1 flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+        <span>文書外のノード({typeLabel(node.type)}) — term 宣言のように文書構造の外から参照専用で存在する</span>
+        {/* G1.7 方針2: これ自体が「選択中ノードの詳細」表示なので alias バッジを出す。 */}
+        {node.alias && <span className={ALIAS_BADGE_CLASS}>#{node.alias}</span>}
       </div>
       <BlockContent node={node} depth={0} />
       <RelationPanel id={id} />
@@ -76,8 +78,11 @@ function Block({ node, depth }: { node: StrataNode; depth: number }) {
           <BlockContent node={node} depth={depth} />
         </div>
         <div className="flex shrink-0 items-center gap-1 pt-0.5">
-          {node.alias && (
-            <span className="font-mono text-[10px] text-muted-foreground/70" title={node.id}>
+          {/* G1.7 方針2: alias バッジは「ノード詳細(選択時)」に限定する
+              (常時表示すると和文本文の脇に英字 alias が常に並び、ユーザー目視
+              フィードバックの「同じ場所を示す2つの表記が奇妙」の一因になっていた)。 */}
+          {isSelected && node.alias && (
+            <span className={ALIAS_BADGE_CLASS} title={node.id}>
               #{node.alias}
             </span>
           )}
@@ -148,9 +153,17 @@ function UnknownBlockContent({ node }: { node: UnknownNode }) {
 }
 
 function KnownBlockContent({ node, depth }: { node: KnownNode; depth: number }) {
+  const { idx } = useGraph();
+  const resolveRef = (id: NodeId) => {
+    const n = idx.nodes.get(id);
+    return n ? deriveLabel(n) : id;
+  };
   switch (node.type) {
     case "document":
-      return <h1 className="text-2xl font-bold">{node.title || node.alias || "(無題文書)"}</h1>;
+      // G1.7: フォールバック順(title → alias → ULID 短縮)を label.ts の1箇所に
+      // 集約する。ただし deriveLabel と違って切り詰めない(28文字は文書見出しには
+      // 短すぎる、documentTitle 側のコメント参照)。
+      return <h1 className="text-2xl font-bold">{documentTitle(node)}</h1>;
     case "section": {
       const sizeClass = HEADING_SIZE[Math.min(depth, HEADING_SIZE.length - 1)];
       return (
@@ -177,7 +190,7 @@ function KnownBlockContent({ node, depth }: { node: KnownNode; depth: number }) 
             {node.entries.map((e, i) => (
               <tr key={i} className="border-b border-border/50 last:border-0">
                 <th className="w-1/3 py-1 pr-3 text-left align-top font-medium text-muted-foreground">{e.key}</th>
-                <td className="py-1">{cellValueToText(e.value)}</td>
+                <td className="py-1">{cellValueToText(e.value, resolveRef)}</td>
               </tr>
             ))}
           </tbody>
@@ -227,6 +240,11 @@ function KnownBlockContent({ node, depth }: { node: KnownNode; depth: number }) 
 }
 
 function TableContent({ node }: { node: Extract<StrataNode, { type: "table" }> }) {
+  const { idx } = useGraph();
+  const resolveRef = (id: NodeId) => {
+    const n = idx.nodes.get(id);
+    return n ? deriveLabel(n) : id;
+  };
   const colTree = useMemo(() => buildHeaderTree(node.cols), [node.cols]);
   const rowTree = useMemo(() => buildHeaderTree(node.rows), [node.rows]);
   const colDepth = useMemo(() => Math.max(headerDepth(colTree), 1), [colTree]);
@@ -276,7 +294,7 @@ function TableContent({ node }: { node: Extract<StrataNode, { type: "table" }> }
                 const value = lookup.get(cellKey(rl.path, cl.path));
                 return (
                   <td key={ci} className="border border-border px-2 py-1 text-right">
-                    {cellValueToText(value)}
+                    {cellValueToText(value, resolveRef)}
                   </td>
                 );
               })}
@@ -299,8 +317,11 @@ function FigureContent({ node }: { node: Extract<StrataNode, { type: "figure" }>
           {node.encode.color ? `, color=${node.encode.color}` : ""}]
         </div>
         {dataNode && (
-          <div className="mt-1 text-xs text-muted-foreground">
-            データ元: {dataNode.alias ?? dataNode.id}({typeLabel(dataNode.type)})
+          <div className="mt-1 flex flex-wrap items-center gap-1 text-xs text-muted-foreground">
+            <span>
+              データ元: {deriveLabel(dataNode)}({typeLabel(dataNode.type)})
+            </span>
+            {dataNode.alias && <span className={ALIAS_BADGE_CLASS}>#{dataNode.alias}</span>}
           </div>
         )}
         {node.caption && (
