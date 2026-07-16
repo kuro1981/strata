@@ -40,6 +40,13 @@ pub enum BuildError {
     /// ワークスペース build で doc 修飾参照の文書 alias 側は解決できたが、その文書内に
     /// 該当ブロック alias が無い(WP-W2.3 の後者)。
     UnknownBlockAlias { doc: String, alias: String, span: Span },
+    /// 単一ファイル build(`--workspace` 無し)で `doc:` 参照(D53、sml-spec §1.14)が
+    /// 自文書以外の文書 alias を指している(自文書 alias のみ解決可)。`CrossDocRef` と
+    /// 同型だが対象がブロックでなく文書そのものなのでメッセージ文言が違う専用 variant。
+    DocRefNeedsWorkspace { alias: String, span: Span },
+    /// ワークスペース build で `doc:<alias>` の alias がどのメンバー文書の frontmatter
+    /// alias にも一致しない(D53)。
+    UnknownDoc { alias: String, span: Span },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
     /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。

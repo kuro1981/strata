@@ -1084,6 +1084,22 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
                 line, col, doc, alias, doc, alias
             )]
         }
+        // D53: 単一ファイル build で `doc:` 参照が自文書以外の文書 alias を指している。
+        E::DocRefNeedsWorkspace { alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: DocRefNeedsWorkspace: 参照 'doc:{}' はワークスペース対応コマンド(`strata build --workspace <strata.toml>` または `strata render --workspace <strata.toml>`)が必要です。",
+                line, col, alias
+            )]
+        }
+        // D53: ワークスペース build で `doc:<alias>` の alias がどのメンバーの文書 alias にも一致しない。
+        E::UnknownDoc { alias, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: UnknownDoc: 参照 'doc:{}' — 文書 alias '{}' を持つメンバーがワークスペースにありません。",
+                line, col, alias, alias
+            )]
+        }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }
 }

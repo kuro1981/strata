@@ -19,7 +19,9 @@ use crate::ast::{
     RefTarget, SmlBlock, SmlInline,
 };
 use crate::error::{Diag, DiagKind};
-use crate::scan::{fence_kind_word, looks_like_attr_line, looks_like_html_line, split_lines_range, RawBlock, RawKind};
+use crate::scan::{
+    fence_kind_word, looks_like_attr_line, looks_like_html_line, split_lines_range, ListItemLines, RawBlock, RawKind,
+};
 use crate::span::Span;
 use crate::value::DateFormat;
 
@@ -180,13 +182,15 @@ fn build_block(src: &str, rb: RawBlock, diags: &mut Vec<Diag>, refdefs: &RefDefs
             let body = crate::gfm_table::parse_gfm_table_body(src, header_span, &row_spans, diags);
             BlockKind::GfmTable(body)
         }
-        RawKind::List { ordered, start, item_line_spans } => {
-            // D24(2026-07-14 裁定): item_line_spans はインデント無し(ルート)・
-            // インデント有り(ネスト候補)の両方を含む文書順のフラット列(scan.rs が
-            // マーカー行として一括りにしている)。ここでインデント量(2スペース/レベル)
-            // を解釈して木構造に組み立てる(sml-spec §6.1 の table.rs と同じ手法)。
+        RawKind::List { ordered, start, items: item_lines } => {
+            // D24(2026-07-14 裁定): item_lines はインデント無し(ルート)・インデント
+            // 有り(ネスト候補)の両方を含む文書順のフラット列(scan.rs がマーカー行として
+            // 一括りにしている)。ここでインデント量(2スペース/レベル)を解釈して木構造に
+            // 組み立てる(sml-spec §6.1 の table.rs と同じ手法)。
+            // D52(2026-07-16 裁定): 各要素は「マーカー行 + 継続行」を既に束ねた
+            // `ListItemLines`(scan.rs)。継続行は項目のインライン本文へ併合する。
             let mut idx = 0;
-            let items = parse_list_items(src, &item_line_spans, &mut idx, diags, 0, refdefs);
+            let items = parse_list_items(src, &item_lines, &mut idx, diags, 0, refdefs);
             BlockKind::List { ordered, items, start }
         }
         RawKind::Fence { marker_line_span, body_span } => {
@@ -482,9 +486,14 @@ fn strip_task_marker(src: &str, span: Span) -> (Span, Option<bool>) {
 /// `lines[*idx]` から、インデントレベルが `level` のリスト項目を連続して読み取る
 /// (レベルが `level` 未満になったら親スコープに戻ったとみなして止まる)。各項目の
 /// 直後の行がさらに1段深ければ、それを子リスト(D24)として再帰的に読み取る。
+///
+/// D52(2026-07-16 裁定、sml-spec.md §1.14): `lines[*idx]` は「マーカー行+継続行」を
+/// scan.rs が既に束ねた `ListItemLines`。レベル判定(同階層/子/親への復帰)は従来どおり
+/// マーカー行のインデントだけで行う——継続行はレベル判定に参加せず、常にそのマーカー
+/// 行が属する項目の本文へ併合される。
 fn parse_list_items(
     src: &str,
-    lines: &[Span],
+    lines: &[ListItemLines],
     idx: &mut usize,
     diags: &mut Vec<Diag>,
     level: usize,
@@ -492,8 +501,8 @@ fn parse_list_items(
 ) -> Vec<ListItem> {
     let mut items = Vec::new();
     while *idx < lines.len() {
-        let line_span = lines[*idx];
-        let indent = leading_space_count(src, line_span);
+        let marker_span = lines[*idx].marker;
+        let indent = leading_space_count(src, marker_span);
         let (line_level, aligned) = list_level_of(indent);
         if !aligned {
             if line_level < level {
@@ -501,7 +510,7 @@ fn parse_list_items(
             }
             diags.push(Diag::new(
                 DiagKind::InconsistentIndent,
-                line_span,
+                marker_span,
                 "リスト項目のインデントが2スペース単位で揃っていません",
             ));
             *idx += 1;
@@ -513,29 +522,56 @@ fn parse_list_items(
         if line_level > level {
             diags.push(Diag::new(
                 DiagKind::InconsistentIndent,
-                line_span,
+                marker_span,
                 "リスト項目のインデントが深すぎます(対応する親項目がありません)",
             ));
             *idx += 1;
             continue;
         }
 
+        let continuation = lines[*idx].continuation.clone();
         *idx += 1;
-        let (text_span, id_tag) = extract_trailing_id_tag(src, line_span, diags);
-        // 項目マーカー(`- ` / `N. `、インデント込み)はインライン本文に含めない。
-        let text_span = strip_list_marker(src, text_span);
+
+        // D52: 行末 `{#id}` タグは項目の**最終行**(継続行があればその最後、無ければ
+        // マーカー行自身)から抽出する。fmt の注入位置もここに合わせる(Setext 見出しと
+        // 同型、`plan_list_item_id` 参照)。
+        let last_line = continuation.last().copied().unwrap_or(marker_span);
+        let (last_text_span, id_tag) = extract_trailing_id_tag(src, last_line, diags);
+
+        // 項目マーカー(`- ` / `N. `、インデント込み)・タスクマーカーはマーカー行から
+        // のみ剥がす(継続行には無い、CommonMark 準拠)。継続行が無ければ id タグ抽出後の
+        // `last_text_span` が同じマーカー行を指しているのでそちらを使う。
+        let marker_text_span = if continuation.is_empty() { last_text_span } else { marker_span };
+        let marker_text_span = strip_list_marker(src, marker_text_span);
         // M6(D40 Tier2、監査④): タスクリストのチェック状態を項目マーカーの直後から読む。
-        let (text_span, checked) = strip_task_marker(src, text_span);
-        let inline = crate::inline::parse_inlines(src, text_span, diags, refdefs);
+        let (marker_text_span, checked) = strip_task_marker(src, marker_text_span);
+
+        let inline = if continuation.is_empty() {
+            crate::inline::parse_inlines(src, marker_text_span, diags, refdefs)
+        } else {
+            // マーカー行(マーカー・タスクマーカー除去済み)→ 中間の継続行 → 最終継続行
+            // (id タグ除去済み)の順で1段落として結合する(§8.2 の「項目=段落1つ」は
+            // 維持——複数ソース行にまたがれるようになるだけ)。各行はソース上で改行1バイト
+            // のみを挟んで連続するため `parse_paragraph_inlines` の連続スパン経路に乗り、
+            // 強調等が行を跨げる(裁量: 継続行先頭の見た目上のインデントは字句どおり
+            // Text に残す——段落の複数行併合と同じ扱いに揃える。最終報告参照)。
+            let mut spans = Vec::with_capacity(continuation.len() + 1);
+            spans.push(marker_text_span);
+            spans.extend_from_slice(&continuation[..continuation.len() - 1]);
+            spans.push(last_text_span);
+            parse_paragraph_inlines(src, &spans, diags, refdefs)
+        };
+
+        let full_item_span = Span::new(marker_span.start, last_line.end);
 
         let mut child = None;
         if *idx < lines.len() {
-            let next_indent = leading_space_count(src, lines[*idx]);
+            let next_indent = leading_space_count(src, lines[*idx].marker);
             let (next_level, next_aligned) = list_level_of(next_indent);
             if next_aligned && next_level == level + 1 {
-                let ordered = line_marker_is_ordered(src, lines[*idx]);
+                let ordered = line_marker_is_ordered(src, lines[*idx].marker);
                 let start = if ordered {
-                    list_marker_start_value_of(src, lines[*idx])
+                    list_marker_start_value_of(src, lines[*idx].marker)
                 } else {
                     None
                 };
@@ -544,7 +580,7 @@ fn parse_list_items(
             }
         }
 
-        items.push(ListItem { span: line_span, inline, id_tag, child, checked });
+        items.push(ListItem { span: full_item_span, inline, id_tag, child, checked });
     }
     items
 }

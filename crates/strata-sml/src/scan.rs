@@ -33,7 +33,7 @@ pub(crate) enum RawKind {
     /// M6(D40): 段落直後の Setext 下線(`===`/`---`)を検出した場合、`level` 1/2 の
     /// 見出しとして扱う。`line_spans` は下線を除いた見出しテキスト行。
     SetextHeading { level: u8, line_spans: Vec<Span> },
-    List { ordered: bool, start: Option<u64>, item_line_spans: Vec<Span> },
+    List { ordered: bool, start: Option<u64>, items: Vec<ListItemLines> },
     /// `marker_line_span`: `::table {#...}` などマーカー行の中身。
     /// `body_span`: マーカー行の次から閉じ `::` 行の手前まで(不透明)。
     Fence { marker_line_span: Span, body_span: Span },
@@ -56,6 +56,18 @@ pub(crate) enum RawKind {
 pub(crate) struct PhysLine {
     pub(crate) content: Span,
     pub(crate) full: Span,
+}
+
+/// D52(2026-07-16 裁定、sml-spec.md §1.14): リスト項目1つぶんの行群。
+/// `marker` はマーカー行(`- `/`N. ` 等)自身の中身スパン、`continuation` はその直後に
+/// 空行・新規マーカー行・他ブロック開始行を挟まず続く**継続行**(CommonMark の
+/// indented continuation / lazy continuation の両方をここでまとめて扱う。層Bが
+/// レベル判定するインデントの情報は `marker`/`continuation` 各々の生スパンから
+/// 引き続き取れる)。項目=段落1つの制約は維持する(継続行はその1段落の続きの
+/// ソース行というだけで、別ブロックにはならない)。
+pub(crate) struct ListItemLines {
+    pub marker: Span,
+    pub continuation: Vec<Span>,
 }
 
 /// `range` に限定して物理行に分割する(フェンス本体・フロントマター後の本体など
@@ -377,15 +389,15 @@ fn merge_loose_lists(blocks: Vec<RawBlock>) -> Vec<RawBlock> {
             );
         if mergeable {
             let full_end = block.full_span.end;
-            let RawKind::List { item_line_spans, .. } = block.kind else {
+            let RawKind::List { items, .. } = block.kind else {
                 unreachable!("mergeable は List 同士でのみ true になる")
             };
             let prev = out.last_mut().expect("mergeable は out が非空であることを前提とする");
             prev.full_span = Span::new(prev.full_span.start, full_end);
-            let RawKind::List { item_line_spans: prev_items, .. } = &mut prev.kind else {
+            let RawKind::List { items: prev_items, .. } = &mut prev.kind else {
                 unreachable!("mergeable の判定で prev も List であることを確認済み")
             };
-            prev_items.extend(item_line_spans);
+            prev_items.extend(items);
         } else {
             out.push(block);
         }
@@ -510,16 +522,41 @@ fn scan_one_block(src: &str, lines: &[PhysLine], i: usize, diags: &mut Vec<Diag>
         }
         LineClass::ListItem(ordered) => {
             let start = i;
-            let mut end = i;
-            let mut items = vec![lines[i].content];
-            while end + 1 < lines.len() {
-                if let LineClass::ListItem(_) = classify(src, &lines[end + 1]) {
-                    end += 1;
-                    items.push(lines[end].content);
-                } else {
+            let mut items: Vec<ListItemLines> = Vec::new();
+            let mut idx = i;
+            loop {
+                debug_assert!(matches!(classify(src, &lines[idx]), LineClass::ListItem(_)));
+                let marker = lines[idx].content;
+                idx += 1;
+                // D52: マーカー行の直後、空行・新規マーカー行・他ブロック開始行(見出し・
+                // フェンス・水平線・blockquote・参照リンク定義行・属性行)を挟まずに続く
+                // 行は、この項目の**継続行**として本文へ併合する(CommonMark 準拠の
+                // indented/lazy continuation)。GFM パイプ表の開始候補(ヘッダ+区切り行)
+                // だけは2行先読みして継続扱いから除外する(scan_one_block 既定枝と同じ
+                // 判定を流用)。
+                let mut continuation = Vec::new();
+                while idx < lines.len() {
+                    match classify(src, &lines[idx]) {
+                        LineClass::Paragraph => {
+                            if looks_like_table_row(lines[idx].content.slice(src))
+                                && idx + 1 < lines.len()
+                                && matches!(classify(src, &lines[idx + 1]), LineClass::Paragraph)
+                                && is_table_delim_row(lines[idx + 1].content.slice(src))
+                            {
+                                break;
+                            }
+                            continuation.push(lines[idx].content);
+                            idx += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                items.push(ListItemLines { marker, continuation });
+                if idx >= lines.len() || !matches!(classify(src, &lines[idx]), LineClass::ListItem(_)) {
                     break;
                 }
             }
+            let end = idx - 1;
             let start_value =
                 if ordered { list_marker_start_value(lines[start].content.slice(src).trim_start_matches(' ')) } else { None };
             let full_span = Span::new(lines[start].full.start, lines[end].full.end);
@@ -528,7 +565,7 @@ fn scan_one_block(src: &str, lines: &[PhysLine], i: usize, diags: &mut Vec<Diag>
                 RawBlock {
                     full_span,
                     attr_line_span: None,
-                    kind: RawKind::List { ordered, start: start_value, item_line_spans: items },
+                    kind: RawKind::List { ordered, start: start_value, items },
                 },
             )
         }
@@ -795,12 +832,33 @@ mod tests {
         let blocks = no_diags(src);
         assert_eq!(blocks.len(), 1);
         match &blocks[0].kind {
-            RawKind::List { ordered, item_line_spans, .. } => {
+            RawKind::List { ordered, items, .. } => {
                 assert!(!ordered);
-                assert_eq!(item_line_spans.len(), 2);
+                assert_eq!(items.len(), 2);
             }
             _ => panic!("expected list"),
         }
+    }
+
+    /// D52: 継続行(空行を挟まず続く非マーカー行)は新しいブロックにならず、直前の
+    /// 項目の継続行として同じ `ListItemLines` に併合される。
+    #[test]
+    fn continuation_line_merges_into_preceding_item() {
+        let src = "- 長い文…\n  続き\n- two\n";
+        let blocks = no_diags(src);
+        assert_eq!(blocks.len(), 1, "継続行は独立ブロックにならない");
+        match &blocks[0].kind {
+            RawKind::List { items, .. } => {
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].continuation.len(), 1);
+                // scan.rs 層は行のインデントを剥がさない(層Bが必要なら扱う。
+                // 本実装は層Bでも剥がさない裁量——最終報告参照)。
+                assert_eq!(items[0].continuation[0].slice(src), "  続き");
+                assert!(items[1].continuation.is_empty());
+            }
+            _ => panic!("expected list"),
+        }
+        assert_coverage(src, &blocks);
     }
 
     /// M6(D40): blockquote は専用の `RawKind::Quote` になる(旧: 段落フォールバック)。

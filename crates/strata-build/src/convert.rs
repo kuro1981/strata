@@ -36,6 +36,11 @@ struct Builder<'a> {
     /// D42: ワークスペース横断参照の解決 index。単一ファイル build では `None`
     /// (doc 修飾参照に遭遇したら `CrossDocRef` を返す、WP-W1.3)。
     cross_doc: Option<&'a CrossDocIndex>,
+    /// D53: `doc:` スキームのワークスペース全体解決 index(文書 alias → Document
+    /// ノード NodeId)。単一ファイル build では `None`(自文書の alias は
+    /// `reg.alias_table` 経由で解決できるので、ここが `None` でも自己参照は解決できる。
+    /// `None` かつ自文書 alias にも一致しない場合のみ `DocRefNeedsWorkspace`)。
+    doc_index: Option<&'a HashMap<String, NodeId>>,
 }
 
 /// Pass 2 が複数ファイルにまたがって共有する可変状態(WP-W2: ワークスペース統合)。
@@ -61,6 +66,7 @@ pub(crate) fn run(
     reg: Registry,
     shared: &mut SharedState,
     cross_doc: Option<&CrossDocIndex>,
+    doc_index: Option<&HashMap<String, NodeId>>,
 ) -> (Option<NodeId>, Vec<BuildError>) {
     let mut b = Builder {
         src,
@@ -71,6 +77,7 @@ pub(crate) fn run(
         ord: &mut shared.ord,
         hr_count: 0,
         cross_doc,
+        doc_index,
     };
 
     let root = b.reg.document_id;
@@ -391,6 +398,39 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `doc:` スキーム(D53)専用の target 解決。ULID はそのまま。alias は
+    /// **自文書の alias 表(`reg.alias_table`)を最初に当たる**——単一ファイル build でも
+    /// 自文書 alias だけは解決できる(D53「単一ファイル build では自文書 alias のみ
+    /// 解決可」)。そこで見つからなければ `doc_index`(ワークスペース全体の文書 alias
+    /// 表、`Some` はワークスペース build のときだけ)を引く: 無ければ
+    /// `DocRefNeedsWorkspace`、あるが未知なら `UnknownDoc`。
+    fn resolve_doc_ref_target(&mut self, target: &RefTarget, span: Span) -> NodeId {
+        match target {
+            RefTarget::Ulid(u) => NodeId(*u),
+            RefTarget::Label(alias) => {
+                if let Some(&id) = self.reg.alias_table.get(alias) {
+                    return id;
+                }
+                match self.doc_index {
+                    Some(idx) => match idx.get(alias) {
+                        Some(&id) => id,
+                        None => {
+                            self.errors.push(BuildError::UnknownDoc { alias: alias.clone(), span });
+                            NodeId::new()
+                        }
+                    },
+                    None => {
+                        self.errors.push(BuildError::DocRefNeedsWorkspace { alias: alias.clone(), span });
+                        NodeId::new()
+                    }
+                }
+            }
+            // inline.rs の `doc:` パースは `<doc>/<alias>` を分割しない(D53)ため、
+            // DocLabel はここに到達しない。防御的に「文書 alias 側」として扱う。
+            RefTarget::DocLabel { doc, .. } => self.resolve_doc_ref_target(&RefTarget::Label(doc.clone()), span),
+        }
+    }
+
     /// doc 修飾参照(`<文書alias>/<ブロックalias>`)の共通解決ロジック。
     /// - `cross_doc: None`(単一ファイル build、`--workspace` 無し)→ `CrossDocRef`
     ///   (黙って落とさず `--workspace` の必要性を案内する、WP-W1.3)
@@ -475,7 +515,11 @@ impl<'a> Builder<'a> {
             }
             SmlInline::Ref { scheme, target, coord, text } => {
                 let text_str = text.slice(self.src).to_string();
-                let to = self.resolve_ref_target(target, *text);
+                let to = if *scheme == RefScheme::Doc {
+                    self.resolve_doc_ref_target(target, *text)
+                } else {
+                    self.resolve_ref_target(target, *text)
+                };
                 self.validate_scheme(*scheme, to, *text);
                 let coord = coord.as_ref().map(|c| CoreCellCoord { row_path: c.row_path.clone(), col_path: c.col_path.clone() });
                 self.graph.link(from, Rel::RefersTo, to, None);
@@ -507,6 +551,8 @@ impl<'a> Builder<'a> {
             RefScheme::Fig => Some(NodeKindTag::Figure),
             RefScheme::Math => Some(NodeKindTag::Math),
             RefScheme::Cell => Some(NodeKindTag::Table),
+            // D53: `doc:` は Document ノードのみを指せる。
+            RefScheme::Doc => Some(NodeKindTag::Document),
         };
         let Some(expected) = expected else { return };
         let Some(&actual) = self.reg.node_kind.get(&to) else { return };

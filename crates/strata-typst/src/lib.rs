@@ -484,6 +484,20 @@ impl<'a> TypstRenderer<'a> {
             };
         }
 
+        // D53(2026-07-16 裁定、sml-spec.md §1.14): `doc:` 参照(Document ノード直指し)。
+        // Document は本文として描画されず Typst の `<label>` を持たない(D21: render_node
+        // の Document 枝は空文字列を返す)ため、同一/別文書を問わず常に**文書タイトルの
+        // 退化テキスト**になる(`#link` しない——リンク先ラベルが存在しないため)。
+        if matches!(self.graph.nodes.get(&to).map(|n| &n.payload), Some(NodePayload::Document(_))) {
+            let workspace_title = self.workspace.as_ref().and_then(|ws| {
+                let owner = ws.doc_of.get(&to)?;
+                ws.doc_titles.get(owner).cloned()
+            });
+            let title = workspace_title.unwrap_or_else(|| self.document_title_fallback(to));
+            let base = if !text.is_empty() { typst_escape(text) } else { typst_escape(&title) };
+            return format!("{}{}", base, coord_suffix);
+        }
+
         // D44: クロスドキュメント参照(対象が今描画中の文書と異なる)は、単一ファイル
         // PDF の Typst ラベルを跨げないため常に退化テキスト化する(--hide の非表示と
         // 同じ「リンクを外しプレーンテキスト化」の扱いだが、warnings は積まない —
@@ -519,6 +533,20 @@ impl<'a> TypstRenderer<'a> {
             Some(_) => format!("#link(<{}>)[§{}]", label(to), coord_suffix),
             None => format!("#link(<{}>)[参照{}]", label(to), coord_suffix),
         }
+    }
+
+    /// D53: `doc:` 参照(ワークスペース情報が無い単一文書 render)の文書タイトル
+    /// フォールバック。D21 の3段フォールバックのうち文書メタ(`Document.title`)と
+    /// 最初の H1 の2段まで(3段目のファイル名フォールバックはここでは持たない
+    /// ——`render_root` の `fallback_title` は呼び出し側の入力ファイル名だが、この
+    /// メソッドは任意の Document ノードを指せるので、必ずしも今の root と同じとは
+    /// 限らない。裁量: 汎用フォールバックとして「文書」を使う)。
+    fn document_title_fallback(&self, to: NodeId) -> String {
+        let title = match self.graph.nodes.get(&to).map(|n| &n.payload) {
+            Some(NodePayload::Document(d)) => d.title.clone(),
+            _ => None,
+        };
+        title.or_else(|| self.first_h1_title(to)).unwrap_or_else(|| "文書".to_string())
     }
 
     /// D22: `Term` の描画。`text` があればそれを、無ければ Term ノードの `name` を、

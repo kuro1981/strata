@@ -228,6 +228,10 @@ pub enum RefScheme {
     Fig,
     Math,
     Cell,
+    /// `doc:<文書alias>`(または ULID)— Document ノードを直接指す(D53、
+    /// sml-spec.md §1.14)。target は他スキームと違い `<doc>/<alias>` のスラッシュ修飾を
+    /// 取らない(文書そのものを指すので「文書内のブロック」という第2階層が無い)。
+    Doc,
 }
 
 /// `cell:` 参照の座標(sml-spec §5.3): `<行path>|<列path>`。

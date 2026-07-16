@@ -86,17 +86,30 @@ export function GraphProvider({ graph, children }: { graph: GraphJson; children:
     else blockRefs.current.delete(id);
   }, []);
 
-  const scrollToSelected = useCallback((id: NodeId) => {
-    // タブ切り替え直後は対象要素がまだ DOM に無いことがあるので次フレームまで待つ。
-    requestAnimationFrame(() => {
-      const el = blockRefs.current.get(id);
-      if (el) {
+  const scrollToSelected = useCallback(
+    (id: NodeId) => {
+      // タブ切り替え直後は対象要素がまだ DOM に無いことがあるので次フレームまで待つ。
+      requestAnimationFrame(() => {
+        const el = blockRefs.current.get(id);
+        if (!el) return;
+        // D53: `doc:` 参照(Document ノード直指し)のクリックは「文書先頭へスクロール」
+        // であるべきだが、Document ノード自身は文書ペインの最外周コンテナ(文書全体を
+        // 包む巨大な div)として登録されている。通常の scrollIntoView(block: "center")
+        // だと長い文書ではその巨大な div の「中央」に合わせようとして途中までスクロール
+        // してしまう。Document ターゲットだけは文書ペインのスクロールコンテナ自体を
+        // 先頭(scrollTop: 0)へ戻す特別扱いにする(裁量、最終報告参照)。
+        if (idx.nodes.get(id)?.type === "document") {
+          const scrollParent = el.closest<HTMLElement>("[data-doc-scroll]");
+          (scrollParent ?? el).scrollTo({ top: 0, behavior: "smooth" });
+          return;
+        }
         el.scrollIntoView({ behavior: "smooth", block: "center" });
         el.classList.add("strata-block-flash");
         window.setTimeout(() => el.classList.remove("strata-block-flash"), 1200);
-      }
-    });
-  }, []);
+      });
+    },
+    [idx],
+  );
 
   const select = useCallback(
     (id: NodeId | null) => {

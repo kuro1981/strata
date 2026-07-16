@@ -45,7 +45,9 @@ export function DocumentPane() {
           ))}
         </div>
       )}
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+      {/* D53: `doc:` 参照の「先頭スクロール」着地(GraphContext.scrollToSelected)が
+          Document ターゲットのときにこのコンテナ自体を scrollTop: 0 へ戻すための目印。 */}
+      <div data-doc-scroll className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {active.root && <BlockTree id={active.root} />}
       </div>
     </div>

@@ -538,3 +538,90 @@ fn hide_inherits_through_multiple_container_levels_class_on_top_only() {
     assert!(!out.text.contains("面接メモ"), "{}", out.text);
     assert!(!out.text.contains("深いネストの補足項目"), "コンテナの class が孫リスト項目まで継承されるはず: {}", out.text);
 }
+
+// ---- D53(2026-07-16 裁定): `doc:` 参照(Document ノード直指し)の typst 着地 --------
+//
+// Document は Typst 本文に描画されず <label> を持たない(D21)ため、`doc:` 参照は
+// 常に文書タイトルの退化テキストになる(#link は使わない)。
+
+/// 単一文書 render(workspace ctx 無し): text 無しなら Document.title を退化テキストに。
+#[test]
+fn doc_ref_without_text_uses_document_title_as_plain_text() {
+    let target_doc_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: Some("型付きリンクの話".into()) })));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: String::new() }],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("型付きリンクの話"), "{out}");
+    assert!(!out.contains("#link"), "Document ターゲットは #link しない(ラベルが無い): {out}");
+    assert!(!out.contains('@'), "Document ターゲットは自動番号参照(@)の対象でもない: {out}");
+}
+
+/// text ありなら表示 text を優先する(他スキームと同じロスレス原則)。
+#[test]
+fn doc_ref_with_text_uses_display_text_not_document_title() {
+    let target_doc_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: Some("原題".into()) })));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: "表示テキスト".into() }],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("表示テキスト"), "{out}");
+    assert!(!out.contains("原題"), "{out}");
+}
+
+/// title 未設定なら最初の H1 見出しへフォールバックする(D21 の3段フォールバックの
+/// 2段目まで、`document_title_fallback` 参照)。
+#[test]
+fn doc_ref_title_falls_back_to_first_h1_when_no_title() {
+    let target_doc_id = NodeId::new();
+    let h1_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: None })));
+    g.insert(Node::new(h1_id, NodePayload::Section(Section { heading: vec![Inline::Text { s: "見出し代替".into() }] })));
+    g.link(target_doc_id, Rel::Contains, h1_id, Some(0));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: String::new() }],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("見出し代替"), "{out}");
+}
+
+/// ワークスペース render: 別文書の `doc:` 参照は `WorkspaceRenderCtx::doc_titles` の
+/// 表示名を使う(自文書 render 単体の `Document.title` は見ない——別文書なので参照でき
+/// ないのが自然)。
+#[test]
+fn doc_ref_in_workspace_mode_uses_workspace_doc_title() {
+    let target_doc_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: None })));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: String::new() }],
+    ));
+
+    let mut doc_of = std::collections::HashMap::new();
+    doc_of.insert(target_doc_id, "typed-links.sml".to_string());
+    doc_of.insert(para_id, "home.sml".to_string());
+    let mut doc_titles = std::collections::HashMap::new();
+    doc_titles.insert("typed-links.sml".to_string(), "型付きリンクは「なぜ繋いだか」を保存する".to_string());
+    doc_titles.insert("home.sml".to_string(), "home".to_string());
+
+    let ctx = crate::WorkspaceRenderCtx { doc_of: &doc_of, doc_titles: &doc_titles, current_doc: "home.sml" };
+    let out = render_to_typst_workspace_with_hide(&g, para_id, "fallback", &[], Some(ctx)).unwrap();
+    assert!(out.text.contains("型付きリンクは「なぜ繋いだか」を保存する"), "{}", out.text);
+    assert!(!out.text.contains("#link"), "{}", out.text);
+}

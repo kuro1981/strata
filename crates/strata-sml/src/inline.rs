@@ -11,8 +11,9 @@
 //!     `` `code` `` → `SmlInline::Emph`(`code` の中はネスト不可)
 //!   - `$...$` → `SmlInline::MathTex(Span)`。**内側 TeX のスパンのみ**を記録し、
 //!     中身はパースしない(tex2math は build の仕事)
-//!   - `[text](scheme:target)` の参照6スキーム(`ref` `table` `fig` `math` `term` `cell`)
-//!     → `SmlInline::Ref` / `SmlInline::TermRef`。`cell:target#path|path` は `CellCoord` へ
+//!   - `[text](scheme:target)` の参照7スキーム(`ref` `table` `fig` `math` `term` `cell`
+//!     `doc`、D53)→ `SmlInline::Ref` / `SmlInline::TermRef`。`cell:target#path|path` は
+//!     `CellCoord` へ
 //!   - `[text](http(s)://…)` / `[text](mailto:…)` / autolink `<http(s)://…>` →
 //!     `SmlInline::Link`。`![alt](url)` → `SmlInline::Image`
 //!   - `[text][label]` + 文書中の定義行 `[label]: url` → `SmlInline::Link`
@@ -27,7 +28,10 @@
 //!     block.rs の alias 検証と同じ「診断は積むが止めない」方針)
 //!   - `term` の target のみ字句制限の対象外(日本語等の任意の非空文字列を許す)
 //!   - `cell` の座標 path の各 key が字句違反なら `BadCellCoord` を積む(ノードは構築する)
-//!   - スキーム語がこの6種のいずれでもなければ `UnknownScheme` を積み、
+//!   - `doc`(D53)の target: ULID なら `RefTarget::Ulid`、そうでなければ
+//!     `[A-Za-z0-9_-]+` の字句検証のみ(`<doc>/<alias>` のスラッシュ修飾は**取らない**
+//!     — 文書そのものを指すので「文書内のブロック」という第2階層が無い)
+//!   - スキーム語がこの7種のいずれでもなければ `UnknownScheme` を積み、
 //!     **ノードは構築せずテキストへフォールバック**(sml-spec に無いスキームなので
 //!     未解決のまま残すより「読めるテキスト」に倒す)
 //!   - dest が `http://`/`https://`/`mailto:` で始まる場合は外部リンク(M6 D40、
@@ -376,6 +380,18 @@ fn try_parse_link(src: &str, open: usize, limit: usize, diags: &mut Vec<Diag>) -
             let target = resolve_target(rest, target_span, diags);
             Some((SmlInline::Ref { scheme, target, coord: None, text: text_span }, next_i))
         }
+        "doc" => {
+            // D53(2026-07-16 裁定、sml-spec.md §1.14): 文書そのものを指す参照。target は
+            // ULID か文書 alias のみ(`ref:`/`table:` 等と違い `<doc>/<alias>` のスラッシュ
+            // 修飾は取らない — 文書自身を指すのに「文書内のブロック」という第2階層は
+            // 無いため)。解決(自文書のみ/ワークスペース全体)は build の仕事。
+            if rest.is_empty() {
+                return None;
+            }
+            let target_span = Span::new(rest_abs_start, dest_span.end);
+            let target = resolve_doc_target(rest, target_span, diags);
+            Some((SmlInline::Ref { scheme: RefScheme::Doc, target, coord: None, text: text_span }, next_i))
+        }
         "term" => {
             // term: の target のみ字句制限の対象外(D5 の対象外、sml-spec §5.2)。
             if rest.is_empty() {
@@ -495,6 +511,25 @@ fn resolve_target(text: &str, span: Span, diags: &mut Vec<Diag>) -> RefTarget {
 
 fn is_valid_key_charset(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// `doc:` の target を解決する(D53)。ULID ならそのまま、そうでなければ文書 alias の
+/// 字句(`[A-Za-z0-9_-]+`)として検証する。`resolve_target` と違い `<doc>/<alias>` の
+/// スラッシュ修飾は解釈しない(スラッシュを含む場合はそのまま字句違反として
+/// `BadKeyCharset` を積む——文書そのものを指すスキームにブロック修飾を書くのは
+/// 誤用のシグナル)。
+fn resolve_doc_target(text: &str, span: Span, diags: &mut Vec<Diag>) -> RefTarget {
+    if let Ok(u) = text.parse::<Ulid>() {
+        return RefTarget::Ulid(u);
+    }
+    if !is_valid_key_charset(text) {
+        diags.push(Diag::new(
+            DiagKind::BadKeyCharset,
+            span,
+            format!("doc 参照ターゲット '{text}' の字句が不正です([A-Za-z0-9_-]+ のみ許可)"),
+        ));
+    }
+    RefTarget::Label(text.to_string())
 }
 
 /// `<行path>|<列path>` をパースする。`path = key ("." key)*`(sml-spec §7)。
@@ -624,6 +659,54 @@ mod tests {
         assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, DiagKind::UnknownScheme);
+    }
+
+    // ---- D53(2026-07-16 裁定): `doc:` スキーム -----------------------------------------
+
+    #[test]
+    fn doc_scheme_with_alias_target_parses_as_ref() {
+        let src = "[Home](doc:home)";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Doc, target: RefTarget::Label(l), text, coord } => {
+                assert_eq!(l, "home");
+                assert_eq!(text.slice(src), "Home");
+                assert!(coord.is_none());
+            }
+            other => panic!("expected doc ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doc_scheme_with_ulid_target_parses_as_ulid_ref() {
+        let ulid_str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let src = format!("[x](doc:{ulid_str})");
+        let (out, diags) = parse(&src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Doc, target: RefTarget::Ulid(u), .. } => {
+                assert_eq!(u.to_string(), ulid_str);
+            }
+            other => panic!("expected doc ref with ulid target, got {other:?}"),
+        }
+    }
+
+    /// `doc:` は `<doc>/<alias>` のスラッシュ修飾を取らない(D53): `ref:`/`table:` と違い、
+    /// スラッシュを含む target はそのまま字句違反として `BadKeyCharset` になる。
+    #[test]
+    fn doc_scheme_does_not_split_on_slash() {
+        let src = "[x](doc:home/top)";
+        let (out, diags) = parse(src);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].kind, DiagKind::BadKeyCharset);
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Doc, target: RefTarget::Label(l), .. } => {
+                assert_eq!(l, "home/top");
+            }
+            other => panic!("expected doc ref (best-effort label), got {other:?}"),
+        }
     }
 
     // ---- M6 D40: WP-C1 --------------------------------------------------------------

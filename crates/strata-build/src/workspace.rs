@@ -172,13 +172,27 @@ pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<W
         }
     }
 
+    // D53: `doc:` スキームのワークスペース全体解決 index(文書 alias → Document
+    // ノード NodeId)。`cross_doc[alias][alias]` でも同じ値が引けるが(文書自身の
+    // frontmatter alias はその文書自身の alias_table にも登録されている)、意図を
+    // 明確にするため専用の表として組む。
+    let mut doc_index: HashMap<String, NodeId> = HashMap::new();
+    for f in &files {
+        if let Some(doc_id) = f.registry.document_id
+            && let Some(alias) = f.registry.id_alias.get(&doc_id)
+        {
+            doc_index.entry(alias.clone()).or_insert(doc_id);
+        }
+    }
+
     let mut shared = SharedState::new();
     let mut roots: Vec<DocRoot> = Vec::with_capacity(files.len());
     for f in files {
         let path = members[f.idx].path.clone();
         let src = &members[f.idx].src;
         let doc_alias = f.registry.document_id.and_then(|id| f.registry.id_alias.get(&id).cloned());
-        let (root, pass2_errors) = convert::run(src, &f.doc, f.registry, &mut shared, Some(&cross_doc));
+        let (root, pass2_errors) =
+            convert::run(src, &f.doc, f.registry, &mut shared, Some(&cross_doc), Some(&doc_index));
         for e in pass2_errors {
             errors.push(WorkspaceError::Member { path: path.clone(), error: e });
         }

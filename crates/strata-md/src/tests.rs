@@ -681,3 +681,61 @@ fn hide_inherits_through_multiple_container_levels_class_on_top_only() {
     assert!(!out.text.contains("面接メモ"), "{}", out.text);
     assert!(!out.text.contains("深いネストの補足項目"), "コンテナの class が孫リスト項目まで継承されるはず: {}", out.text);
 }
+
+// ---- D53(2026-07-16 裁定): `doc:` 参照(Document ノード直指し)の md 着地 ----------
+//
+// 単一文書 render: 文書タイトルのプレーンテキスト(自己参照にファイルリンクは不要)。
+// ワークスペース render: 相対 `.md` リンク(文書先頭、アンカー無し)。
+
+#[test]
+fn doc_ref_without_text_single_doc_uses_document_title_as_plain_text() {
+    let target_doc_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: Some("型付きリンクの話".into()) })));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: String::new() }],
+    ));
+
+    let out = render_to_md(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("型付きリンクの話"), "{out}");
+    assert!(!out.contains('['), "単一文書自己参照は Markdown リンクにしない: {out}");
+}
+
+#[test]
+fn doc_ref_in_workspace_mode_becomes_relative_md_link_to_document_start() {
+    let target_doc_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_doc_id, NodePayload::Document(Document { title: None })));
+    g.insert(para(
+        para_id,
+        vec![Inline::Ref { to: target_doc_id, rel: Rel::RefersTo, coord: None, text: String::new() }],
+    ));
+
+    let mut doc_of = std::collections::HashMap::new();
+    doc_of.insert(target_doc_id, "typed-links.sml".to_string());
+    doc_of.insert(para_id, "home.sml".to_string());
+    let mut doc_stems = std::collections::HashMap::new();
+    doc_stems.insert("typed-links.sml".to_string(), "typed-links".to_string());
+    let mut doc_titles = std::collections::HashMap::new();
+    doc_titles.insert("typed-links.sml".to_string(), "型付きリンクは「なぜ繋いだか」を保存する".to_string());
+
+    let cross_anchors = std::collections::HashMap::new();
+    let ctx = crate::WorkspaceRenderCtx {
+        doc_of: &doc_of,
+        doc_stems: &doc_stems,
+        doc_titles: &doc_titles,
+        current_doc: "home.sml",
+        cross_anchors: &cross_anchors,
+    };
+    let out = render_to_md_workspace_with_hide(&g, para_id, "fallback", &[], Some(ctx)).unwrap();
+    assert!(
+        out.text.contains("[型付きリンクは「なぜ繋いだか」を保存する](typed-links.md)"),
+        "{}",
+        out.text
+    );
+    // アンカー(`#...`)は付かない——文書先頭への参照であり見出しではないため。
+    assert!(!out.text.contains("typed-links.md#"), "{}", out.text);
+}

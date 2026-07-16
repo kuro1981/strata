@@ -382,6 +382,26 @@ impl<'a> MdRenderer<'a> {
             };
         }
 
+        // D53(2026-07-16 裁定、sml-spec.md §1.14): `doc:` 参照(Document ノード直指し)。
+        // ワークスペース render では**相対 `.md` リンク(文書先頭、アンカー無し)**、
+        // 単一文書 render(自文書 alias のみ解決可)では文書タイトルのプレーンテキストに
+        // 倒す(同一ファイル内自己参照にファイルリンクは不要)。
+        if let Some(NodePayload::Document(d)) = self.graph.nodes.get(&to).map(|n| &n.payload) {
+            if let Some(ws) = &self.workspace {
+                let owner = ws.doc_of.get(&to).cloned().unwrap_or_else(|| ws.current_doc.to_string());
+                let title = ws.doc_titles.get(&owner).cloned().unwrap_or_else(|| owner.clone());
+                let label = if !text.is_empty() { text.to_string() } else { title };
+                if owner == ws.current_doc {
+                    return format!("{}{}", md_escape(&label), coord_suffix);
+                }
+                let stem = ws.doc_stems.get(&owner).cloned().unwrap_or_else(|| owner.clone());
+                return format!("[{}]({stem}.md){}", md_escape(&label), coord_suffix);
+            }
+            let title = d.title.clone().unwrap_or_else(|| "文書".to_string());
+            let label = if !text.is_empty() { text.to_string() } else { title };
+            return format!("{}{}", md_escape(&label), coord_suffix);
+        }
+
         // D44: クロスドキュメント参照(対象が今描画中の文書と異なる)。見出しへの参照は
         // 相対 `.md` リンク+アンカー(`compute_workspace_anchors` の事前計算表を引く)、
         // それ以外は単一文書時の退化規則(§4.4)に文書名を添えたもの(裁量、最終報告参照)。
@@ -455,6 +475,8 @@ impl<'a> MdRenderer<'a> {
             Some(NodePayload::Value(_)) => ("値", short_label(self.graph, to)),
             Some(NodePayload::Quote(_)) => ("引用", short_label(self.graph, to)),
             Some(NodePayload::ThematicBreak(_)) => ("水平線", String::new()),
+            // D53: Document ターゲットは `render_ref` が専用分岐でここへ来る前に処理する
+            // (ここに来るのは Document 以外の未分類ケースのみ。網羅性のため残置)。
             Some(NodePayload::Document(_)) | Some(NodePayload::Term(_)) | Some(NodePayload::Section(_)) | None => {
                 ("参照", short_label(self.graph, to))
             }
