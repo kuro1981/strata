@@ -2,6 +2,13 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 
+/* この CSS を外部プロジェクト(strata-editor 等)が import した場合でも、
+   ui/ 自身のソースが Tailwind のスキャン対象に入るよう明示する。
+   これが無いと、外部側のビルドでは ui 内でしか使っていないユーティリティ
+   (fill-background 等)が生成されず、SVG の fill が既定の黒に落ちる。
+   パスはこの CSS ファイルからの相対。 */
+@source "./";
+
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {

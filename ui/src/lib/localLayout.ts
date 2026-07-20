@@ -11,6 +11,17 @@
 // 動的に配分する(等分割ではない)。これにより hop2 やノード数が多いリングでラベルが
 // 重なりにくくなる(#2)。加えて contains の隣接を常時混ぜることで、意味エッジが少ない
 // ノード(特に未選択時のルート)でも1ノードだけにならないようにする(#1)。
+//
+// G2.1(実機目視評価の是正 #1): G1.6 の「リング半径をラベル幅から逆算」だけでは
+// 実データで不十分だった(中心ラベルがリングに被る、ring 間でラベルが重なる)。
+// 追加で以下を行う:
+// 1. アンカー切替: 各ノードのラベルは角度(x の符号)に応じて左右どちらに伸ばすかを
+//    決める(左半分のノードは左側にラベルを伸ばす)。中心ノードは常に「上」に伸ばす
+//    (どの角度のリングノードとも構造的に対称な位置)。
+// 2. 衝突解決パス: 全ノード(中心含む)のラベル矩形を集め、AABB 重なりを検出したら
+//    垂直方向に押し出す(反復数回で収束)。中心は固定点として動かさず、他のラベルを
+//    押しのける側にする。結果は `labelSide`/`labelDy` として各ノードに持たせ、
+//    描画側(GraphPane.tsx)はそれをそのまま使う(位置計算のロジックをここに一本化)。
 
 import type { GraphIndex } from "./graphIndex";
 import { deriveLabel, estimateLabelWidth, truncate } from "./label";
@@ -18,6 +29,10 @@ import { NODE_R } from "./layout";
 import type { Edge, NodeId } from "@/types/graph";
 
 export type LocalNodeKind = "center" | "semantic" | "contains";
+
+/** G2.1: ラベルの水平アンカー側。中心ノードは常に "top"(上に伸ばす、リングのどの
+ * 角度とも対称)。 */
+export type LabelSide = "left" | "right" | "top";
 
 export interface LocalNodePos {
   id: NodeId;
@@ -28,6 +43,10 @@ export interface LocalNodePos {
   hop: number;
   /** ノードの由来。"contains" = 親・子・兄弟(G1.6 #1、常時表示・視覚的に控えめ)。 */
   kind: LocalNodeKind;
+  /** G2.1: ラベルをどちら向きに伸ばすか(衝突解決込みで localLayout 側が確定させる)。 */
+  labelSide: LabelSide;
+  /** G2.1: ラベル矩形の衝突解決で加えた追加の垂直オフセット(px)。既定 0。 */
+  labelDy: number;
 }
 
 export interface LocalLayoutResult {
@@ -58,6 +77,20 @@ const MAX_SIBLINGS = 8;
 export const MAX_LABEL_CONTAINS = 10;
 export const MAX_LABEL_HOP1 = 18;
 export const MAX_LABEL_HOP2 = 12;
+/** 中心ノードのラベル最大文字数(GraphPane.tsx の描画側と共有。G2.1 でここに集約し、
+ * 衝突解決の矩形計算にも同じ値を使う)。 */
+export const MAX_LABEL_CENTER = 24;
+
+/** ノード種別+hop からノード円の半径を決める(GraphPane.tsx の描画と同じ規則。
+ * G2.1: 衝突解決の矩形計算にも使うのでここに一本化する)。 */
+export function nodeRadiusFor(kind: LocalNodeKind, hop: number): number {
+  return kind === "center" ? NODE_R + 4 : kind === "contains" ? NODE_R - 2 : hop === 1 ? NODE_R + 1 : NODE_R - 1;
+}
+
+/** ノード種別+hop からラベルの最大表示文字数を決める(GraphPane.tsx の描画と同じ規則)。 */
+function maxLabelFor(kind: LocalNodeKind, hop: number): number {
+  return kind === "center" ? MAX_LABEL_CENTER : kind === "contains" ? MAX_LABEL_CONTAINS : hop === 2 ? MAX_LABEL_HOP2 : MAX_LABEL_HOP1;
+}
 
 export function computeLocalLayout(
   idx: GraphIndex,
@@ -134,12 +167,13 @@ export function computeLocalLayout(
   }
   const r2 = placeWedges(hop1, byHop1, positions, idx, Math.max(HOP2_RADIUS_MIN, r1 + 70), NODE_R - 1, MAX_LABEL_HOP2, cmp);
 
-  const nodes: LocalNodePos[] = [
+  const rawNodes: Omit<LocalNodePos, "labelSide" | "labelDy">[] = [
     { id: center, x: 0, y: 0, hop: 0, kind: "center" },
     ...containsNodes.map((id) => ({ id, x: positions.get(id)!.x, y: positions.get(id)!.y, hop: 1, kind: "contains" as const })),
     ...hop1.map((id) => ({ id, x: positions.get(id)!.x, y: positions.get(id)!.y, hop: 1, kind: "semantic" as const })),
     ...hop2.map((id) => ({ id, x: positions.get(id)!.x, y: positions.get(id)!.y, hop: 2, kind: "semantic" as const })),
   ];
+  const nodes = resolveLabelCollisions(rawNodes, idx);
 
   // 描画するエッジ: 含めたノード同士を結ぶものは意味エッジ・contains 問わず全て描く
   // (例: hop1 の意味ノードがたまたま中心の実子である場合、contains の破線も重ねて出る
@@ -266,4 +300,102 @@ function placeWedges(
   });
 
   return radius;
+}
+
+/** ラベル背景プレートと同じ縦の高さ(GraphPane.tsx の `<rect>` と揃える)。 */
+const LABEL_RECT_H = 14;
+/** ラベル矩形の衝突解決の反復回数(裁量の値。ノード数が多くても軽い計算量なので
+ * 収束を優先してやや多めに回す)。 */
+const COLLISION_ITERATIONS = 8;
+/** 1ノードが衝突解決で動ける最大の累積オフセット(px)。無制限に押し出すと
+ * ノードから離れすぎて「どのノードのラベルか」がわからなくなるので上限を設ける。 */
+const MAX_LABEL_DY = 46;
+
+interface LabelRect {
+  id: NodeId;
+  /** 中心ノードは固定点として扱う(押しのけられる側専用、動かさない)。 */
+  fixed: boolean;
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  dy: number;
+}
+
+/** ノードの位置・種別からラベル矩形の初期形状とアンカー側を決める(G2.1 #1: 角度に
+ * 応じたアンカー切替)。中心は常に真上、リングのノードは x の符号(左右どちらの
+ * 半分にいるか)でラベルを伸ばす向きを決める。 */
+function initialLabelRect(idx: GraphIndex, n: Omit<LocalNodePos, "labelSide" | "labelDy">): { rect: LabelRect; side: LabelSide } {
+  const node = idx.nodes.get(n.id);
+  const maxLabel = maxLabelFor(n.kind, n.hop);
+  const label = node ? truncate(deriveLabel(node), maxLabel) : n.id;
+  const labelW = estimateLabelWidth(label);
+  const r = nodeRadiusFor(n.kind, n.hop);
+
+  if (n.kind === "center") {
+    const halfW = labelW / 2 + 3;
+    const baseline = -(r + 12);
+    return {
+      side: "top",
+      rect: { id: n.id, fixed: true, x0: n.x - halfW, x1: n.x + halfW, y0: n.y + baseline - 11, y1: n.y + baseline + 3, dy: 0 },
+    };
+  }
+
+  const side: LabelSide = n.x >= 0 ? "right" : "left";
+  const width = labelW + 6;
+  const x0 = side === "right" ? n.x + r + 3 : n.x - r - 3 - width;
+  const x1 = x0 + width;
+  return { side, rect: { id: n.id, fixed: false, x0, x1, y0: n.y - 8, y1: n.y + LABEL_RECT_H - 8, dy: 0 } };
+}
+
+/** G2.1 #1: ラベル矩形の衝突解決パス。初期配置(アンカー切替込み)の矩形同士で
+ * AABB の重なりを検出したら垂直方向に押し出し、数回反復して収束させる(裁量:
+ * 半径方向ではなく垂直ナッジを選んだ理由 — 半径方向に押すとリングの同心円の見た目が
+ * 崩れるが、垂直ナッジならノードの位置自体は変えずラベルだけをずらせるため)。
+ * 中心ノードのラベル矩形は固定点として扱う(他のノードのラベルが中心のラベルと
+ * 重なったら、中心側ではなくもう一方を押しのける)。 */
+function resolveLabelCollisions(raw: Omit<LocalNodePos, "labelSide" | "labelDy">[], idx: GraphIndex): LocalNodePos[] {
+  const sides = new Map<NodeId, LabelSide>();
+  const rects: LabelRect[] = raw.map((n) => {
+    const { rect, side } = initialLabelRect(idx, n);
+    sides.set(n.id, side);
+    return rect;
+  });
+
+  for (let iter = 0; iter < COLLISION_ITERATIONS; iter++) {
+    let moved = false;
+    for (let i = 0; i < rects.length; i++) {
+      for (let j = i + 1; j < rects.length; j++) {
+        const a = rects[i];
+        const b = rects[j];
+        const ay0 = a.y0 + a.dy;
+        const ay1 = a.y1 + a.dy;
+        const by0 = b.y0 + b.dy;
+        const by1 = b.y1 + b.dy;
+        const xOverlap = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+        const yOverlap = Math.min(ay1, by1) - Math.max(ay0, by0);
+        if (xOverlap <= 0 || yOverlap <= 0) continue;
+
+        const push = yOverlap / 2 + 1;
+        const aOnTop = ay0 + ay1 <= by0 + by1;
+        if (!a.fixed && !b.fixed) {
+          a.dy += aOnTop ? -push : push;
+          b.dy += aOnTop ? push : -push;
+        } else if (!a.fixed) {
+          a.dy += aOnTop ? -push * 2 : push * 2;
+        } else if (!b.fixed) {
+          b.dy += aOnTop ? push * 2 : -push * 2;
+        } else {
+          continue; // 両方固定(中心同士、実際には起こらない)なら何もしない。
+        }
+        moved = true;
+      }
+    }
+    // 発散防止: 累積オフセットを上限でクランプする。
+    for (const r of rects) r.dy = Math.max(-MAX_LABEL_DY, Math.min(MAX_LABEL_DY, r.dy));
+    if (!moved) break;
+  }
+
+  const dyOf = new Map(rects.map((r) => [r.id, r.dy]));
+  return raw.map((n) => ({ ...n, labelSide: sides.get(n.id) ?? "right", labelDy: dyOf.get(n.id) ?? 0 }));
 }

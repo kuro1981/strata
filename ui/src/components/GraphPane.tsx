@@ -22,6 +22,8 @@ import { useGraph, type GraphMode } from "@/state/GraphContext";
 import { computeLayout, INDENT, NODE_R, ROW_H, type DocBand, type LayoutResult } from "@/lib/layout";
 import {
   computeLocalLayout,
+  nodeRadiusFor,
+  MAX_LABEL_CENTER,
   MAX_LABEL_CONTAINS,
   MAX_LABEL_HOP1,
   MAX_LABEL_HOP2,
@@ -330,10 +332,6 @@ function LocalGraph({
   );
 }
 
-// G1.6 #2: リングごとのラベル最大文字数(localLayout.ts の弧長計算と揃える。強めの
-// 切り詰め+全文は <title> の hover tooltip で見せる)。
-const MAX_LABEL_CENTER = 24;
-
 function LocalNode({
   pos,
   node,
@@ -347,8 +345,12 @@ function LocalNode({
 }) {
   if (!node) return null;
   const isContains = pos.kind === "contains";
-  const r = pos.kind === "center" ? NODE_R + 4 : isContains ? NODE_R - 2 : pos.hop === 1 ? NODE_R + 1 : NODE_R - 1;
-  const opacity = isContains ? 0.7 : pos.hop === 2 ? 0.85 : 1;
+  const isCenter = pos.kind === "center";
+  const r = nodeRadiusFor(pos.kind, pos.hop);
+  // G2.1: 円の不透明度はラベルの不透明度と切り離す(以前は `<g>` にまとめてかけていた
+  // ため、contains ラベルが 0.7 の円透明度と掛け合わさって薄すぎて読めなくなっていた —
+  // 実機目視評価の是正 #1 の一部)。
+  const circleOpacity = isContains ? 0.7 : pos.hop === 2 ? 0.85 : 1;
   const maxLabel =
     pos.kind === "center"
       ? MAX_LABEL_CENTER
@@ -361,11 +363,39 @@ function LocalNode({
   const shownLabel = truncate(fullLabel, maxLabel);
   const labelW = estimateLabelWidth(shownLabel);
 
+  // G2.1 #1: ラベル位置は localLayout.ts の衝突解決パスが決めた `labelSide`/`labelDy`
+  // をそのまま使う(アンカー切替+垂直ナッジ済み)。中心は上、リングは左右。
+  const dy = pos.labelDy;
+  let textX: number;
+  let textAnchor: "start" | "end" | "middle";
+  let rectX: number;
+  let rectY: number;
+  let textY: number;
+  if (pos.labelSide === "top") {
+    textAnchor = "middle";
+    textX = 0;
+    const baseline = -(r + 12);
+    rectY = baseline - 11 + dy;
+    textY = baseline + dy;
+    rectX = -labelW / 2 - 3;
+  } else if (pos.labelSide === "left") {
+    textAnchor = "end";
+    textX = -(r + 6);
+    rectX = -(r + 3) - (labelW + 6);
+    rectY = -8 + dy;
+    textY = 4 + dy;
+  } else {
+    textAnchor = "start";
+    textX = r + 6;
+    rectX = r + 3;
+    rectY = -8 + dy;
+    textY = 4 + dy;
+  }
+
   return (
     <g
       style={{ transform: `translate(${pos.x}px, ${pos.y}px)`, transition: "transform 300ms ease" }}
       className="cursor-pointer"
-      opacity={opacity}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
@@ -374,6 +404,7 @@ function LocalNode({
       <title>{hoverTitle(node)}</title>
       <circle
         r={isSelected ? r + 2 : r}
+        opacity={circleOpacity}
         className={cn(
           pos.kind === "center"
             ? "fill-primary"
@@ -389,13 +420,18 @@ function LocalNode({
       />
       {/* ラベル背景プレート(白抜き/背景色): リングが混み合ってラベル同士が重なっても
           読めるようにする(G1.6 #2)。 */}
-      <rect x={r + 3} y={-8} width={labelW + 6} height={14} rx={3} className="fill-background" opacity={0.82} />
+      <rect x={rectX} y={rectY} width={labelW + 6} height={14} rx={3} className="fill-background" opacity={0.88} />
       <text
-        x={r + 6}
-        y={4}
+        x={textX}
+        y={textY}
+        textAnchor={textAnchor}
         className={cn(
           "select-none text-[11px]",
-          pos.kind === "center" ? "fill-foreground font-semibold" : isContains ? "fill-muted-foreground" : "fill-foreground",
+          // G2.1: contains ラベルは「薄すぎて読めない」フィードバックを受けて
+          // fill-muted-foreground(円の 0.7 透明度と掛け合わさっていた)から
+          // fill-foreground の 75% 不透明度へ変更(コントラストを一段上げる。
+          // 円は circleOpacity で引き続き控えめに描く)。
+          isCenter ? "fill-foreground font-semibold" : isContains ? "fill-foreground/75 font-medium" : "fill-foreground",
         )}
       >
         {shownLabel}
