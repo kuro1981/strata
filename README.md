@@ -1,140 +1,146 @@
 # Strata — 意味グラフ文書フォーマット
 
-人志向ドキュメントと機械志向ドキュメントを **1つの源(canonical)** から派生させる、新しい文書表現。
-Markdown の制約を越え、既存フォーマットの上に乗せず、独立した表現として設計する。
+Strata is a semantic-graph document format: a single canonical graph (nodes +
+typed edges) from which both human-facing views (Typst/Markdown) and
+AI-facing views (an ID-addressable context dump) are derived losslessly. SML,
+its authoring surface, is a strict superset of CommonMark/GFM — any plain
+Markdown file is already a valid SML draft.
 
-このリポジトリは設計対話から起こした初期成果物。Claude Code + git 管理への中間地点。
+人志向の読みやすさと機械志向の厳密さを、1つの **canonical グラフ**から両方
+導出することで両立させる文書フォーマット。オーサリング表面の SML
+(Strata Markup Language)は Markdown (CommonMark/GFM) の**上位互換**として
+設計されており、素の `.md` ファイルはそのまま有効な SML ドラフトになる。
 
----
-
-## このプロジェクトの出発点(対話の要約)
-
-### 問い
-人志向(Markdown のような可読性重視)と機械志向の両方が要る時代。機械が複雑さ(数式・多段結合表など)を読め、parser を通せば人も読める表現は何か。当初は「隠蔽された HTML か?」と考えた。
-
-### 辿り着いた骨子
-
-1. **複雑さは6軸に分解できる**
-   - 軸1 参照構造(線形→木→DAG→グラフ)
-   - 軸2 局所表記(数式・入れ子の再帰木)
-   - 軸3 レイアウト束ね(結合セルは概念か装飾か)
-   - 軸4 文脈依存(「下の表」等の指示語)
-   - 軸5 連続実体(画像: 記号図 / 写真)
-   - 軸6 物理レイアウト(改ページ・段組・列幅)
-   - Markdown は6軸中5軸で力不足。
-
-2. **二項対立ではなく三層**
-   - 層1 オーサリング(人が書く / 書きやすさに全振り)
-   - 層2 canonical(機械が読む + ロスレス / 真実の源)
-   - 層3 render(人が読む・機械が食う / 紙・画面・音声・点字)
-   - Markdown の敗因は1ファイルで3役を兼ねたこと。「隠蔽された HTML」の直感は層2と層3の分離を指していた。
-
-3. **canonical の核心**
-   - **Node + Edge の2レコードだけ**。ファイルは無く、グラフがある。
-   - 表は格子+colspan ではなく **次元の木**(MultiIndex 的)。これで軸3が消え、軸6 も同時に排除される。
-   - 物理レイアウト語を payload 型に持たせない → 漏洩が構文的に不可能。
-   - 粒度はレベル1(段落=ノード)既定 + 需要駆動の `anchor` 昇格。
-   - 数式は MathML サブセットが canonical、TeX はオーサリング表面。
-
-4. **ストア設計**
-   - store(真実の源) = **プレーンテキストの vault**(ドキュメント単位ファイル + ID 埋め込み)。可搬・git 可・grep 可。
-   - index = 派生・使い捨て。当面 **DB なし**(インメモリ Graph を起動時再構築)。必要なら redb。
-   - データはグラフだが、クエリは1〜2ホップなので **グラフDBは不要**。メモリ上は graph 指向、ディスクはフラット。
-   - Qdrant(ベクトル検索)は重いので後回し。
-
-5. **新規性(正直な評価)**
-   - 構成要素はほぼ先行例あり(シングルソース出版 / Xanadu / OHCO-TAG / GraphRAG / MyST / PreTeXt)。
-   - 独自性は (a) 没交渉な4系統 + AI文脈の統合、(b) 表を次元の木で持ち軸3を問いごと消す、(c) 物理排除を型不変条件として強制、の3点。
-   - 既存実用フォーマット(Markdown/MyST/PreTeXt)は皆 OHCO=木。Strata は反証済みの木前提を捨て Text-as-Graph を実用基盤に採る。
-
-詳細は `docs/strata-spec.md` を参照。
+55件以上の設計対話を経て今のかたちに至っている。判断の経緯を追いたい場合は
+`docs/sml-spec.md` §1(D1〜D58 の裁定一覧)と `Plans.md` / git log を参照。
 
 ---
 
-## リポジトリ構成(想定)
+## アーキテクチャ
+
+Strata は3層モデルで構成される。
 
 ```
-strata/
-├── README.md                  # これ
-├── docs/
-│   └── strata-spec.md         # 仕様 v0.1(凍結 vs 保留、先行研究、精密な差分まで)
-├── crates/
-│   ├── strata-core/           # canonical スキーマ(§2/§4/§5/§6)+ 不変条件チェック
-│   │   └── src/lib.rs         # = strata-core.rs
-│   └── tex2math/              # TeX → MathNode(MathML サブセット)Pratt パーサ
-│       └── src/lib.rs         # = tex2math.rs
-└── CONVERSATION.md            # 設計対話の全文ログ(時系列)
+層1: SML (オーサリング表面)      … 人/AI が書く。Markdown 互換 + ID・意味エッジ・
+                                    多次元表・数式などのアノテーション
+       │ strata fmt   (ID 逆注入・冪等)
+       │ strata build (パース・参照解決・不変条件検証)
+       ▼
+層2: canonical グラフ            … Node + Edge のみ。真実の源(ロスレス)
+       │ strata render / view / context / search / site
+       ▼
+層3: ビュー群                    … Typst / Markdown(人向け)、AI コンテキスト、
+                                    検索結果、宣言的ビュー定義の出力、
+                                    静的グラフ UI サイト
 ```
 
-現状のファイル(このアーカイブ内):
-- `strata-spec.md`  — 仕様本体
-- `strata-core.rs`  — strata-core クレートの lib.rs(cargo test 4本パス・警告ゼロ確認済)
-- `tex2math.rs`     — tex2math クレートの lib.rs(cargo test 14本パス・警告ゼロ確認済)
-- `CONVERSATION.md` — 設計対話ログ
+- **ワークスペース**(`strata.toml`、`members` のグロブ列挙)で複数の `.sml`
+  ファイルを束ね、ファイル横断の参照(`ref:<文書alias>/<ブロックalias>`、
+  `doc:<文書alias>`)を解決できる。
+- **ビュー定義**(YAML、`docs/view-def-v1.md`)は canonical グラフから
+  テンプレート消費用のデータファイルを宣言的に取り出す仕組み。セレクタ
+  (alias / class / セル座標 / 型+contains パス)とコンビネータ(rename・
+  rows・join・date・age・concat 等)の組み合わせのみで、スクリプトや正規表現は
+  持たない。
+- **実効 class**(「これは何であるか」を書くブロック属性)は自身+祖先の和集合
+  として全消費者(`render --hide` / `context --class` / view のフィルタ)に
+  一貫して適用される。「誰に見せるか」は文書ではなくビュー側の仕事。
 
----
-
-## Claude Code / git への移行手順(目安)
+## クイックスタート
 
 ```bash
-# 1. cargo ワークスペースを作る
-mkdir strata && cd strata
-git init
-
-# 2. ワークスペース Cargo.toml
-cat > Cargo.toml <<'TOML'
-[workspace]
-resolver = "2"
-members = ["crates/strata-core", "crates/tex2math"]
-TOML
-
-# 3. 各クレートを作って lib.rs を配置
-cargo new crates/strata-core --lib
-cargo new crates/tex2math --lib
-# strata-core.rs → crates/strata-core/src/lib.rs
-# tex2math.rs    → crates/tex2math/src/lib.rs
-# 各 Cargo.toml に serde / serde_json / ulid(core のみ)を追加
-
-# 4. docs/ と README を配置
-mkdir docs
-# strata-spec.md → docs/strata-spec.md
-
-# 5. 確認してコミット
-cargo test
-git add -A && git commit -m "Strata v0.1: spec + canonical schema + tex2math parser"
+nix develop                      # Rust(cargo/clippy)+ Typst + CJK フォント + Node/pnpm 一式
+cargo run -p strata-cli -- --help
 ```
 
-### 各クレートの依存(Cargo.toml)
+## CLI コマンド一覧と実例
 
-strata-core:
-```toml
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-ulid = { version = "1", features = ["serde"] }
+以下は `docs/spec-sml/`(このリポジトリ自身の設計決定 D1〜D58 を SML 化した
+ワークスペース、`docs/spec-sml/strata.toml` + `decisions.sml`)を対象にした
+実際に動く例。
+
+### fmt — ID 逆注入(フォーマッタ)
+
+```bash
+cargo run -p strata-cli -- fmt docs/spec-sml/decisions.sml
+cargo run -p strata-cli -- fmt --check docs/spec-sml/decisions.sml   # 差分の有無だけ確認(exit 0/1)
 ```
 
-tex2math:
-```toml
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+### build — SML → canonical グラフ(JSON)
+
+```bash
+cargo run -p strata-cli -- build --workspace docs/spec-sml/strata.toml
 ```
 
-> 補足: 現状 `tex2math` は `MathNode` を独自に持っている(strata-core のコピー)。
-> git 化の際に `MathNode` を strata-core 側に一本化し、tex2math は strata-core に依存させて
-> 重複を解消するのが最初のリファクタ候補。
+### render — Typst / Markdown への描画
 
----
+```bash
+# 既定は Typst(一次レンダラ)
+cargo run -p strata-cli -- render --workspace docs/spec-sml/strata.toml --format typst -o out/
 
-## 次の一手(候補)
+# 人間向け最小依存ビュー(GitHub・チャット・エディタでそのまま読める GFM)
+cargo run -p strata-cli -- render --workspace docs/spec-sml/strata.toml --format md -o out/
+```
 
-- `MathNode` を strata-core に一本化し、`Inline::Math { tree }` への結線
-- `MathNode → MathML 文字列` レンダラ(層3。ブラウザ表示まで通すと層1→2→3 が数式で一気通貫)
-- 仕様 §10 を「store/index 分離 + プレーンテキスト vault」へ正式改訂
-- vault(プレーンテキスト)⇄ インメモリ Graph の load/save
-- 表(次元の木)→ HTML レンダラ(結合セルの span を葉数から計算)
+### view — 宣言的ビュー定義の適用
 
-## サブセットの既知の穴(出たら足す方針, §6)
-行列(`\begin{matrix}`)、書体(`\mathbb`/`\mathcal`)、多文字関数名(`\sin`/`\log`)は未対応。
-`UnknownCommand` で炙り出されるので、出てきた順に追加する。
+```bash
+cargo run -p strata-cli -- view docs/spec-sml/decisions.sml --view <view-def.yaml> --check
+```
+
+### context — AI 向けコンテキストビュー
+
+```bash
+cargo run -p strata-cli -- context --workspace docs/spec-sml/strata.toml
+# 特定ノード周辺だけ(意味エッジを N ホップ辿った近傍つき)
+cargo run -p strata-cli -- context --workspace docs/spec-sml/strata.toml --node d19 --hops 1
+```
+
+### search — 全文検索 + 構造述語
+
+```bash
+cargo run -p strata-cli -- search "スパンパッチ" --workspace docs/spec-sml/strata.toml
+cargo run -p strata-cli -- search "alias:d1" --workspace docs/spec-sml/strata.toml
+cargo run -p strata-cli -- search "class:note" --workspace docs/spec-sml/strata.toml --json
+```
+
+### site — 自己完結の静的グラフ UI
+
+```bash
+cargo run -p strata-cli -- site --workspace docs/spec-sml/strata.toml -o out/site
+# out/site/index.html を直接開く(サーバ不要)。graph.json + 事前ビルド済み UI(ui/dist)を合成
+```
+
+## ドキュメント案内
+
+| ドキュメント | 位置づけ |
+|---|---|
+| `docs/sml-spec.md` | **正典 (normative)**。§1 に D1〜D58 の裁定一覧(設計決定の記録)、以降にブロック分類・ID規則・文法・処理パイプラインなど |
+| `docs/sml-agent-guide.md` | AI エージェント向けの SML 執筆ガイド(これだけ読めば書けることを品質基準とする実用要約) |
+| `docs/view-def-v1.md` | ビュー定義 YAML の文法(D30〜D35) |
+| `docs/*-handoff.md` | 各マイルストーンの実装ハンドオフ(設計決定→実装への橋渡し) |
+| `Plans.md` / git log | 初期構想〜マイルストーン計画の履歴(現状と乖離している箇所もある一次資料) |
+
+`docs/` にはこの他、互換性監査(`md-compat-audit.md`)やパーサ設計メモなど
+実装過程の資料が置かれている。読む場所に迷ったら `sml-spec.md` §1 から入り、
+関心のある Dn の周辺ドキュメントへ辿るのが早い。
+
+## strata-editor(別リポジトリ)
+
+Strata 用の Tauri v2 エディタ、[strata-editor](https://github.com/kuro1981/strata-editor)
+(未公開ならローカル `~/dev/strata-editor`)。Obsidian の代替を狙う骨格で、
+2ペイン(グラフ⇄文書)の往復・CodeMirror 6 編集ループ・保存時 fmt/build を持つ。
+フォーマット本体(このリポジトリ)への依存は公開境界(クレートの path/git 依存、
+graph JSON スキーマ、`ui/` ビューアの外部参照)のみで、エディタ無しでも
+Strata の全機能(CLI・ビュー・検索・静的サイト出力)は完結する。
+
+## フィードバック
+
+不具合報告・提案は [GitHub Issues](https://github.com/kuro1981/strata/issues)
+へ。Strata の機能追加は「Issue → 設計対話で裁定(`sml-spec.md` §1 に Dn として
+凍結)→ 実装 → Issue を Closes」という流れで進む。運用の詳細は
+[CONTRIBUTING.md](CONTRIBUTING.md) を参照。
+
+## ライセンス
+
+MIT ([LICENSE](LICENSE))
