@@ -464,6 +464,7 @@ dependencies = [
  "strata-context",
  "strata-core",
  "strata-md",
+ "strata-search",
  "strata-sml",
  "strata-typst",
  "strata-view",
@@ -505,6 +506,17 @@ dependencies = [
  "strata-core",
  "strata-sml",
  "tex2math",
+]
+
+[[package]]
+name = "strata-search"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "strata-build",
+ "strata-core",
+ "strata-sml",
 ]
 
 [[package]]

@@ -330,6 +330,35 @@ strata context <file.sml> --class note
 `--node` で対象サブツリーを見た後、**既存のセクション(会社・プロジェクト等)と
 同じ形に揃えて**新しいブロックを書くのが最も安全(既存パターンの模倣)。
 
+### 3.1 grep の代わりに `strata search` を使う
+
+編集対象や参照先を**文字列で**探したい時(「この用語を使っている箇所は他にあるか」
+「`eval-` で始まる alias にはどんなものがあるか」等)は、生ファイルへの `grep` では
+なく `strata search` を使う(D56、sml-spec.md §1.16)。grep と違い、構造述語・
+実効 class(D46: 自身+祖先の和集合)・人間可読ラベル・マッチ箇所のスニペットが
+最初から付いて返ってくる:
+
+```bash
+# 素のテキスト(空白区切りで AND、CJK は部分文字列一致)
+strata search "アジャイル 開発" <file.sml>
+
+# 構造述語: class:<タグ> / term:<用語> / alias:<接頭辞>(混在可)
+strata search "class:note" <file.sml>
+strata search "term:アジャイル" <file.sml>
+strata search "alias:eval-" <file.sml>
+
+# ワークスペース全体を横断
+strata search "class:note" --workspace <strata.toml>
+
+# エディタ・他ツール向け構造化出力
+strata search "アジャイル" <file.sml> --json
+```
+
+ヒットはブロック(ノード)単位。各ヒットに ID・alias・人間可読ラベル・スニペット
+(マッチ箇所を `[[...]]` で囲む)・所属文書が付く。既存ノードへの参照を書く時は
+`strata context` のアドレスタグと同じ流儀(alias があれば alias、無ければ ULID)を
+そのまま使えばよい。`--limit N` で件数を絞れる(既定20)。
+
 ---
 
 ## 4. 書いた後: 必須検証シーケンス

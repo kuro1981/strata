@@ -37,6 +37,11 @@ enum Command {
     /// SPA (`ui/dist`), combined into one output directory (G1 WS-B, sml-spec.md
     /// §1.13 D49/D50). See docs/graph-ui-g1-handoff.md.
     Site(SiteArgs),
+    /// Search an SML file's (or workspace's) canonical graph: plain-text substring
+    /// matching plus structural predicates (`class:`/`term:`/`alias:`, space-separated
+    /// AND), block-level hits with snippets (D56, sml-spec.md §1.16). See
+    /// strata-search.
+    Search(SearchArgs),
 }
 
 #[derive(ClapArgs, Debug)]
@@ -200,6 +205,42 @@ struct SiteArgs {
     ui_dist: Option<PathBuf>,
 }
 
+#[derive(ClapArgs, Debug)]
+struct SearchArgs {
+    /// Search query: plain-text substring terms plus structural predicates
+    /// (`class:<tag>`, `term:<name>`, `alias:<prefix>`), space-separated, all AND'd
+    /// together (D56, sml-spec.md §1.16). CJK text uses ordinary substring matching.
+    /// Positional and required, so it must precede the (optional) `file` positional
+    /// below — clap requires required positionals before optional ones (裁量: the
+    /// spec only fixes the `--workspace` invocation shape; single-file mode is
+    /// `strata search "<query>" <file.sml>`, query first).
+    query: String,
+
+    /// SML file to build and search (omit when using --workspace)
+    file: Option<PathBuf>,
+
+    /// Search a workspace instead of a single file: path to a strata.toml
+    /// (D41/D43). Mutually exclusive with `file`.
+    #[arg(long)]
+    workspace: Option<PathBuf>,
+
+    /// Maximum number of hits to return.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+
+    /// Structured JSON output (one array of hits) instead of human-readable text.
+    /// Intended for editors/AI agents.
+    #[arg(long)]
+    json: bool,
+
+    /// Quick-switcher mode (D56/D57): restrict to documents/headings/any aliased
+    /// block, plain substring match only (no predicate syntax). This is mainly here
+    /// so the API an editor's Ctrl+O would call (`SearchIndex::switcher`) can be
+    /// exercised/tested from the CLI too.
+    #[arg(long)]
+    switcher: bool,
+}
+
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -209,6 +250,130 @@ fn main() {
         Command::View(view_args) => run_view(view_args),
         Command::Context(context_args) => run_context(context_args),
         Command::Site(site_args) => run_site(site_args),
+        Command::Search(search_args) => run_search(search_args),
+    }
+}
+
+/// `strata-cli search` サブコマンド(D56、sml-spec.md §1.16)。内部で
+/// `strata_build::build`(または `--workspace` なら `build_workspace`)→
+/// `strata_search::InMemoryIndex::from_build`/`from_workspace` → `SearchIndex::search`
+/// (`--switcher` なら `SearchIndex::switcher`)を直結する。exit code は他コマンドと
+/// 同じ慣習: 2 = SML を読めない・パースできない、0 = 成功(ヒット0件も0。「該当なし」は
+/// エラーではない)。Warning は他コマンドと同じく stderr に出す。
+fn run_search(args: SearchArgs) {
+    match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members) => run_search_workspace(members, args),
+        InputMode::Single(file) => run_search_single(file, args),
+    }
+}
+
+fn run_search_single(file: PathBuf, args: SearchArgs) {
+    let src = match fs::read_to_string(&file) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read input file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let out = match strata_build::build(&src) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_build_error(e, &src) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(out) => out,
+    };
+    print_warnings(&out.warnings, &src);
+
+    // 単一ファイル build には `WorkspaceBuildOutput` のような複数 `DocRoot` が無いため、
+    // 所属文書はここで組み立てる: path はファイルそのもの、alias はルートノード
+    // (Document)の解決済み alias があればそれ(裁量、`strata site` の単一ファイル
+    // ルート合成と同じ発想)。
+    let alias = out.root.and_then(|id| out.graph.nodes.get(&id)).and_then(|n| n.alias.clone());
+    let doc = strata_search::DocRef { path: file.to_string_lossy().into_owned(), alias };
+    let idx = strata_search::InMemoryIndex::from_build(&out, doc);
+    run_search_query(&idx, &args);
+}
+
+fn run_search_workspace(members: Vec<strata_build::Member>, args: SearchArgs) {
+    let sources: BTreeMap<String, String> =
+        members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
+
+    let ws = match strata_build::build_workspace(&members) {
+        Err(errors) => {
+            for e in &errors {
+                for line in format_workspace_error(e, &sources) {
+                    eprintln!("{}", line);
+                }
+            }
+            std::process::exit(2);
+        }
+        Ok(ws) => ws,
+    };
+    for w in &ws.warnings {
+        let (line, col) = w.diag.span.line_col(sources.get(&w.path).map(String::as_str).unwrap_or(""));
+        eprintln!("{}:{}:{}: warning: {:?}: {}", w.path, line, col, w.diag.kind, w.diag.msg);
+    }
+
+    let idx = strata_search::InMemoryIndex::from_workspace(&ws);
+    run_search_query(&idx, &args);
+}
+
+fn run_search_query(idx: &strata_search::InMemoryIndex, args: &SearchArgs) -> ! {
+    use strata_search::SearchIndex;
+
+    if args.switcher {
+        let hits = idx.switcher(&args.query, args.limit);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&hits).expect("Vec<SwitcherHit> serializes"));
+        } else {
+            print_switcher_hits(&hits);
+        }
+    } else {
+        let query = strata_search::Query::parse(&args.query);
+        let hits = idx.search(&query, args.limit);
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&hits).expect("Vec<Hit> serializes"));
+        } else {
+            print_search_hits(&hits);
+        }
+    }
+    std::process::exit(0);
+}
+
+/// 人間可読出力(1ヒット1〜2行、D56 item4): 1行目にラベル・種別・所属文書・
+/// アドレス(alias があればそちら、無ければ ULID)、2行目にマーキング付きスニペット。
+fn print_search_hits(hits: &[strata_search::Hit]) {
+    if hits.is_empty() {
+        println!("(該当なし)");
+        return;
+    }
+    for (i, h) in hits.iter().enumerate() {
+        let doc = h.doc.as_ref().map(strata_search::DocRef::display).unwrap_or("(所属文書不明)");
+        let addr = h.alias.clone().unwrap_or_else(|| h.node_id.0.to_string());
+        println!("{}. {} [{}] — {} ({})", i + 1, h.label, h.node_type, doc, addr);
+        let s = &h.snippet;
+        if s.matched.is_empty() {
+            println!("   {}", s.after);
+        } else {
+            println!("   {}[[{}]]{}", s.before, s.matched, s.after);
+        }
+    }
+}
+
+fn print_switcher_hits(hits: &[strata_search::SwitcherHit]) {
+    if hits.is_empty() {
+        println!("(該当なし)");
+        return;
+    }
+    for (i, h) in hits.iter().enumerate() {
+        let doc = h.doc.as_ref().map(strata_search::DocRef::display).unwrap_or("(所属文書不明)");
+        let addr = h.alias.clone().unwrap_or_else(|| h.node_id.0.to_string());
+        println!("{}. {} [{}] — {} ({})", i + 1, h.label, h.node_type, doc, addr);
     }
 }
 
