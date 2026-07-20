@@ -42,13 +42,20 @@ pub enum AsType {
 
 #[derive(Debug, Clone)]
 pub enum RowSource {
-    /// 表の葉行を宣言順に辿る。
+    /// 表の葉行を宣言順に辿る。D58: 行キーは class を持たないため class フィルタは
+    /// 対象外(def.rs の `RawRows::into_ast` が `table` と併用時にパースエラーで弾く)。
     Table(Selector),
     /// ノードの contains 子(文書順)を辿る。
     Contains {
         of: Selector,
         node_type: Option<String>,
         extend_path: Option<ExtendPath>,
+        /// D58(sml-spec.md §1.17): `join` の `include-only-class`/`exclude-class` と
+        /// 同一の語彙・同一のセマンティクス(D46 実効 class = 自身+祖先の和集合)で
+        /// 反復対象の子を絞る。フィルタに落ちた子はその行ごとスキップする
+        /// (サブツリーの行が生成されない)。
+        include_only_class: Option<String>,
+        exclude_class: Option<String>,
     },
 }
 

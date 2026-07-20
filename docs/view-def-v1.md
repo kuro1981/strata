@@ -191,7 +191,8 @@ of: self
 
 固定セットのみ: **pick**・**rows**・**join**・**date**・**age**・
 **literal**・**concat**・**class フィルタ**(`join` の `include-only-class`/
-`exclude-class` として実装)。**このセット以外は実装しない** —
+`exclude-class` として実装。D58 で `rows: contains` にも同じ語彙・同じ
+セマンティクスで追加)。**このセット以外は実装しない** —
 足りない時は「コンビネータを1個足す裁定」か「SML 側を直す」の二択(D32)。
 `concat` は D35 で一度見送られたが、実需2件(cv 氏名の姓名結合・tech-stack の
 details+level 結合)が揃ったため D45(sml-spec.md §1.11)で採用された(§4.9)。
@@ -266,6 +267,13 @@ content:
 その行の row_path が「現在の row_path」になり、`of` を省略した `cell`
 セレクタがそのまま列を引ける(§3.4)。
 
+**class フィルタは非対応**(D58、sml-spec.md §1.17)。`rows: contains`
+(§4.3)には `include-only-class`/`exclude-class` があるが、`rows: table`
+には無い。表の行キー(`@rows` の member)はグラフ上のノードではなく
+class を持たない値なので、class 判定の対象が存在しないため。両者の
+併用(`rows.table` + `include-only-class`/`exclude-class`)は
+パースエラーになる。
+
 ### 4.3 `rows` — ノードの子 → 配列(contains モード)
 
 ```yaml
@@ -282,6 +290,52 @@ content:
 `contains` が指すノードの直接の子を文書順(`ord` 昇順)で辿り、`type` が
 指定されていればその型だけに絞り、`item` で評価する。`item` の中では
 `self`(§3.8)がその子ノード自身を指す。
+
+#### class フィルタ(D58)
+
+`join`(§4.4)と同一の語彙・同一のセマンティクスで `include-only-class`/
+`exclude-class` を指定できる。判定は D46 の実効 class(自身+祖先の
+和集合、`contains` 上流をコンテナ単位で継承)。**フィルタに落ちた子は
+その行ごとスキップされる**(行が生成されない。子孫の行だけを間引く
+のではなく、その子が生む部分木そのものが反復対象から外れる)。
+
+D23/D46 で確立した submit/check の2 profile 運用(cv-jis.view.yaml
+などが実例)に対応する典型例: 職務経歴の案件セクションのうち、
+`[class=note]` を付けた「下書きメモ」セクションだけを提出用の行反復から
+除外する。
+
+```yaml
+projects:
+  rows:
+    contains: { alias: co-acme }
+    type: section
+    exclude-class: note
+    item:
+      fields:
+        name: { pick: { of: self } }
+        summary: { join: { of: self, separator: "\n" } }
+```
+
+SML 側:
+
+```
+## Widget案件 {#... alias=proj-widget}
+提出する案件の概要。
+
+[class=note]
+## 下書きメモ {#... alias=proj-draft}
+まだ提出用に整えていない走り書き。
+```
+
+`proj-widget` は `projects` 配列に1行として出力されるが、`proj-draft`
+は `exclude-class: note` によって行ごとスキップされ配列に現れない
+(note セクションの子に段落があってもまとめて消える — `join` の
+「コンテナに1回書けばよい」と同じ D46 の継承)。`include-only-class`
+を使えば逆に note セクションだけを抽出できる(§10 の note/レビュー用途
+向け view を書く場合など)。
+
+`rows: table`(§4.2)にはこのフィルタは無い(D58: 行キーは class を
+持たないため対象外)。
 
 #### `extend-path` — なぜ必要か、何をするか
 

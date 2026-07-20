@@ -387,6 +387,14 @@ pub struct RawRows {
     pub node_type: Option<String>,
     #[serde(default, rename = "extend-path")]
     pub extend_path: Option<RawExtendPath>,
+    /// D58(sml-spec.md §1.17): `rows: contains` 専用のクラスフィルタ。`join` の
+    /// `include-only-class`/`exclude-class` と同一語彙・同一セマンティクス(D46
+    /// 実効 class)。`rows: table` には適用不可(行キーは class を持たないため
+    /// 対象外。`into_ast` で `table` との併用をパースエラーにする)。
+    #[serde(default, rename = "include-only-class")]
+    pub include_only_class: Option<String>,
+    #[serde(default, rename = "exclude-class")]
+    pub exclude_class: Option<String>,
     pub item: Box<RawCombinator>,
 }
 
@@ -411,15 +419,30 @@ impl RawRows {
                 if self.node_type.is_some() || self.extend_path.is_some() {
                     return Err("rows.table と type/extend-path は併用できません".to_string());
                 }
+                // D58: 行キーは class を持たないため、table モードにクラスフィルタは
+                // 適用不可(裁定どおり文書に明記、docs/view-def-v1.md §4.2)。
+                if self.include_only_class.is_some() || self.exclude_class.is_some() {
+                    return Err(
+                        "rows.table には include-only-class/exclude-class を指定できません(D58: 行キーは class を持たないため対象外です)"
+                            .to_string(),
+                    );
+                }
                 RowSource::Table(t.into_ast()?)
             }
-            (None, Some(c)) => RowSource::Contains {
-                of: c.into_ast()?,
-                node_type: self.node_type,
-                extend_path: self
-                    .extend_path
-                    .map(|ep| ExtendPath::AliasSuffix { prefix: ep.alias_suffix.prefix }),
-            },
+            (None, Some(c)) => {
+                if self.include_only_class.is_some() && self.exclude_class.is_some() {
+                    return Err("rows: include-only-class と exclude-class は併用できません".to_string());
+                }
+                RowSource::Contains {
+                    of: c.into_ast()?,
+                    node_type: self.node_type,
+                    extend_path: self
+                        .extend_path
+                        .map(|ep| ExtendPath::AliasSuffix { prefix: ep.alias_suffix.prefix }),
+                    include_only_class: self.include_only_class,
+                    exclude_class: self.exclude_class,
+                }
+            }
             (None, None) => return Err("rows には table か contains のどちらかが必要です".to_string()),
             (Some(_), Some(_)) => return Err("rows.table と rows.contains は併用できません".to_string()),
         };

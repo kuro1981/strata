@@ -517,7 +517,7 @@ fn eval_rows(ctx: &EvalContext, scope: &Scope, source: &RowSource, item: &Combin
                 out.push(eval(ctx, &row_scope, item)?);
             }
         }
-        RowSource::Contains { of, node_type, extend_path } => {
+        RowSource::Contains { of, node_type, extend_path, include_only_class, exclude_class } => {
             let Resolved::Node(parent) = resolve_selector(ctx, scope, of)? else {
                 return Err("rows.contains は親ノードを指す必要があります".to_string());
             };
@@ -528,6 +528,21 @@ fn eval_rows(ctx: &EvalContext, scope: &Scope, source: &RowSource, item: &Combin
                     continue;
                 }
                 ctx.mark(child);
+                // D58(sml-spec.md §1.17): `join` と同一の実効 class(D46: 自身+祖先の
+                // 和集合)判定でフィルタし、落ちた子はその行ごとスキップする
+                // (サブツリーの行が生成されない)。
+                if let Some(want) = include_only_class.as_deref() {
+                    let tags: HashSet<&str> = std::iter::once(want).collect();
+                    if !strata_core::has_effective_class(ctx.graph, &ctx.parents, child, &tags) {
+                        continue;
+                    }
+                }
+                if let Some(deny) = exclude_class.as_deref() {
+                    let tags: HashSet<&str> = std::iter::once(deny).collect();
+                    if strata_core::has_effective_class(ctx.graph, &ctx.parents, child, &tags) {
+                        continue;
+                    }
+                }
                 let mut child_scope = scope.clone();
                 child_scope.current_node = Some(child);
                 if let Some(ExtendPath::AliasSuffix { prefix }) = extend_path {

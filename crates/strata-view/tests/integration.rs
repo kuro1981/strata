@@ -468,6 +468,200 @@ files:
 }
 
 // --------------------------------------------------------------------------
+// rows(contains): class フィルタ(D58、sml-spec.md §1.17)
+// join の include-only-class/exclude-class と同一語彙・同一セマンティクス
+// (D46 実効 class)。フィルタに落ちた子はその行ごとスキップされる。
+// --------------------------------------------------------------------------
+
+#[test]
+fn rows_contains_exclude_class_skips_the_whole_row() {
+    let src = "\
+# parent {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=parent}
+
+## submit案件 {#01ARZ3NDEKTSV4RRFFQ69G5FA1 alias=submit-proj}
+
+[class=note]
+## 下書きメモ {#01ARZ3NDEKTSV4RRFFQ69G5FA2 alias=note-proj}
+
+## check案件 {#01ARZ3NDEKTSV4RRFFQ69G5FA3 alias=check-proj}
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: parent }
+        type: section
+        exclude-class: note
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#;
+    let yaml = yaml_of(src, view);
+    // note class のセクションはその行ごとスキップされ、他2件だけが残る。
+    assert_eq!(yaml, "- name: submit案件\n- name: check案件\n");
+}
+
+#[test]
+fn rows_contains_include_only_class_keeps_only_matching_rows() {
+    let src = "\
+# parent {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=parent}
+
+## submit案件 {#01ARZ3NDEKTSV4RRFFQ69G5FA1 alias=submit-proj}
+
+[class=note]
+## 下書きメモ {#01ARZ3NDEKTSV4RRFFQ69G5FA2 alias=note-proj}
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: parent }
+        type: section
+        include-only-class: note
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#;
+    let yaml = yaml_of(src, view);
+    assert_eq!(yaml, "- name: 下書きメモ\n");
+}
+
+/// D46: rows のクラスフィルタも実効 class(自身+祖先の和集合)で判定する。
+/// コンテナ(ここでは親セクション)に class=note を1回書くだけで、`rows: contains`
+/// が反復する直接の子(孫にあたる note-proj 自身は class を持たない)にも継承され、
+/// その行が丸ごとスキップされること。
+#[test]
+fn rows_contains_class_filter_uses_effective_class_inherited_from_container() {
+    let src = "\
+# parent {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=parent}
+
+[class=note]
+## 下書きまとめ {#01ARZ3NDEKTSV4RRFFQ69G5FA9 alias=note-container}
+
+### 下書き案件A {#01ARZ3NDEKTSV4RRFFQ69G5FA1 alias=note-proj-a}
+
+### 下書き案件B {#01ARZ3NDEKTSV4RRFFQ69G5FA2 alias=note-proj-b}
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: note-container }
+        type: section
+        exclude-class: note
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#;
+    let yaml = yaml_of(src, view);
+    // note-container 自身の class は note-proj-a/b(直接の子)に継承されるので、
+    // 両方ともその行ごとスキップされ、結果は空配列になる。
+    assert_eq!(yaml, "[]\n");
+}
+
+/// D23/D46 の submit/check 分離ユースケース(docs/view-def-v1.md §4.3 の例と対応):
+/// note クラスのセクションを submit の行反復から除外しつつ、check profile では
+/// フィルタ自体が独立して評価されること(profile 分岐とクラスフィルタの併用)。
+#[test]
+fn rows_contains_exclude_class_works_the_same_regardless_of_profile() {
+    let src = "\
+# parent {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=parent}
+
+## submit案件 {#01ARZ3NDEKTSV4RRFFQ69G5FA1 alias=submit-proj}
+
+[class=note]
+## 下書きメモ {#01ARZ3NDEKTSV4RRFFQ69G5FA2 alias=note-proj}
+";
+    let view = r#"
+version: 1
+profiles: [submit, check]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: parent }
+        type: section
+        exclude-class: note
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#;
+    let out = build(src).expect("must build");
+    let view = parse_view_def(view).unwrap();
+
+    let (submit_files, w1) = apply(&out, &view, Some("submit")).unwrap();
+    assert!(w1.is_empty(), "{w1:?}");
+    assert_eq!(submit_files[0].yaml, "- name: submit案件\n");
+
+    let (check_files, w2) = apply(&out, &view, Some("check")).unwrap();
+    assert!(w2.is_empty(), "{w2:?}");
+    // クラスフィルタは profile と独立に評価されるので、check profile でも
+    // 同じ行だけが残る(profile はファイル選択の粒度、class フィルタは行の粒度)。
+    assert_eq!(check_files[0].yaml, "- name: submit案件\n");
+}
+
+#[test]
+fn rows_contains_include_only_and_exclude_class_together_is_rejected() {
+    let result = parse_view_def(
+        r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: parent }
+        include-only-class: note
+        exclude-class: draft
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#,
+    );
+    let err = match result {
+        Ok(_) => panic!("include-only-class と exclude-class の併用はエラーになるはず"),
+        Err(e) => e,
+    };
+    assert!(err.contains("include-only-class"), "{err}");
+}
+
+/// D58: `rows: table` は行キーが class を持たないため、class フィルタの併用は
+/// パースエラーで拒否する(裁定どおり docs/view-def-v1.md §4.2 に明記)。
+#[test]
+fn rows_table_with_class_filter_is_rejected() {
+    let result = parse_view_def(
+        r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        table: { alias: education }
+        exclude-class: note
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#,
+    );
+    let err = match result {
+        Ok(_) => panic!("rows.table への class フィルタ併用はエラーになるはず"),
+        Err(e) => e,
+    };
+    assert!(err.contains("include-only-class") || err.contains("exclude-class"), "{err}");
+    assert!(err.contains("D58"), "{err}");
+}
+
+// --------------------------------------------------------------------------
 // concat(D45): 複数コンビネータの文字列連結
 // --------------------------------------------------------------------------
 

@@ -1,5 +1,8 @@
 //! 統合テスト共通ヘルパ。バイナリは `CARGO_BIN_EXE_strata-cli`(cargo が test 時に
 //! 埋める)で解決する。追加依存なし(std::process::Command のみ)。
+// 複数のテストバイナリから include されるため、バイナリによっては未使用の
+// ヘルパが出る(test 共有モジュールの定番)。dead_code 警告は抑止する。
+#![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
