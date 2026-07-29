@@ -684,11 +684,16 @@ fn ref_with_text_immediately_followed_by_open_paren_gets_chain_guard() {
 }
 
 #[test]
-fn ref_immediately_followed_by_open_bracket_gets_chain_guard() {
-    // `(` だけでなく `[` も chain continuation を誘発する(`#strike[a][b]` は
+fn ref_immediately_followed_by_literal_bracket_text_no_longer_needs_chain_guard() {
+    // `(` だけでなく `[` も chain continuation を誘発しうる(`#strike[a][b]` は
     // 「2個目の content ブロック引数」として食われ `unexpected argument` になることを
-    // `typst compile` で確認済み)。text 無し・番号無し対象の「§」代替表記でも同じ問題が
-    // 起きるため、こちらも guard 対象。
+    // `typst compile` で確認済み)。ただしバグ2修正(docs/secondary-bugs-handoff.md)で
+    // `typst_escape` が `[`/`]` を常時エスケープするようになったため、ユーザーの地の文
+    // (`Inline::Text`)由来の `[` は `\[`(literal な角括弧)として出力され、もはや
+    // chain continuation の危険源にならない(`typst compile` で `#link(<L>)[t]\[x\]`
+    // が問題なくコンパイルされることを実証済み)。この経路ではもう `CHAIN_GUARD` は
+    // 不要というのが新しい期待値(危険源が生きているケースは Image 由来の意図的な
+    // literal `[` — `ref_immediately_followed_by_image_gets_chain_guard` 参照)。
     let target_id = NodeId::new();
     let para_id = NodeId::new();
     let mut g = Graph::default();
@@ -702,7 +707,34 @@ fn ref_immediately_followed_by_open_bracket_gets_chain_guard() {
     ));
 
     let out = render_to_typst(&g, para_id, "fallback").unwrap();
-    assert!(out.contains(&format!("#link(<{}>)[§]/**/", target_id.0)), "{out}");
+    assert!(
+        out.contains(&format!("#link(<{}>)[§]\\[直後の角括弧\\]", target_id.0)),
+        "{out}"
+    );
+    assert!(!out.contains("/**/"), "escaped brackets no longer need the chain guard: {out}");
+}
+
+/// `Inline::Image` は「画像プレースホルダ」表記として `[画像: ...]` という**意図的に
+/// エスケープしない literal な `[`** を自前で組み立てる(`render_inline_fragment` 参照)。
+/// これは `typst_escape` を経由しないため、上のテストでバックスラッシュエスケープにより
+/// 解消された危険源とは無関係に、chainable な呼び出しの直後に来ると今も
+/// chain continuation を誘発しうる。`CHAIN_GUARD` が引き続き必要なケースとして固定する。
+#[test]
+fn ref_immediately_followed_by_image_gets_chain_guard() {
+    let target_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_id, NodePayload::List(List { ordered: false, start: None })));
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Ref { to: target_id, rel: Rel::RefersTo, coord: None, text: String::new() },
+            Inline::Image { url: "https://example.com/x.png".into(), alt: "画像".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains(&format!("#link(<{}>)[§]/**/[画像: 画像]", target_id.0)), "{out}");
 }
 
 #[test]
@@ -795,4 +827,281 @@ fn minimal_repro_cases_compile_with_typst_when_binary_available() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// `typst` バイナリがローカルにあれば渡された Typst ソースをコンパイルして成功を
+/// assert する共通ヘルパ(無ければ黙ってスキップ — 既存の
+/// `minimal_repro_cases_compile_with_typst_when_binary_available` と同じ方針)。
+/// バグ1・バグ2(docs/secondary-bugs-handoff.md)の回帰テストで共用する。
+fn assert_typst_compiles(out: &str, case_name: &str) {
+    let has_typst =
+        std::process::Command::new("typst").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !has_typst {
+        eprintln!("typst バイナリが見つからないためスキップ(typst compile 検証: {case_name})");
+        return;
+    }
+
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("strata-typst-secondary-bugs-test-{}-{}", case_name, std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+    let typ_path = tmp_dir.join("repro.typ");
+    let pdf_path = tmp_dir.join("repro.pdf");
+    std::fs::write(&typ_path, out).expect("write .typ");
+
+    let result =
+        std::process::Command::new("typst").arg("compile").arg(&typ_path).arg(&pdf_path).output().expect("run typst compile");
+
+    assert!(
+        result.status.success(),
+        "typst compile must succeed for {case_name}:\n--- stderr ---\n{}\n--- .typ ---\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+// --- バグ1回帰(docs/secondary-bugs-handoff.md): Anchor のラベル対象化 -----------
+//
+// 修正前は `Inline::Anchor`/`NodePayload::Anchor` を先頭に `#` を伴わない素の
+// `[...]` として描画していた。Typst のマークアップモードでは `#` を伴わない `[...]`
+// は「呼び出し引数の content block」を作らず単なる literal な角括弧文字扱いになるため、
+// 直後の `<label>` は中身にではなく最後の literal `]` トークンに付いてしまい、`Ref`
+// (`ref:<anchor-ulid>`)がその anchor を正しく指せなかった(`typst query` で実証:
+// 修正前は `<ANCH1>` が text "]" に付き、修正後は実際の中身のテキストに付く)。
+
+/// Anchor(段落より細かいスパンを昇格させたノード、strata-core `Anchor`/
+/// `Inline::Anchor` の doc comment 参照)を別の段落から `Ref` で参照するケース。
+/// `#[...] <label>` になっていること(素の `[...] <label>` ではないこと)を確認する。
+#[test]
+fn anchor_referenced_inline_renders_as_labelled_content_block() {
+    let anchor_id = NodeId::new();
+    let host_para_id = NodeId::new();
+    let ref_para_id = NodeId::new();
+    let doc_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(doc_id, NodePayload::Document(Document { title: Some("Anchor回帰".into()) })));
+    g.insert(Node::new(
+        anchor_id,
+        NodePayload::Anchor(strata_core::Anchor { inline: vec![Inline::Text { s: "昇格したスパン".into() }] }),
+    ));
+    g.insert(para(
+        host_para_id,
+        vec![
+            Inline::Text { s: "前置き".into() },
+            Inline::Anchor { to: anchor_id },
+            Inline::Text { s: "後置き".into() },
+        ],
+    ));
+    g.insert(para(
+        ref_para_id,
+        vec![
+            Inline::Text { s: "詳細は".into() },
+            Inline::Ref { to: anchor_id, rel: Rel::RefersTo, coord: None, text: "こちら".into() },
+            Inline::Text { s: "を参照。".into() },
+        ],
+    ));
+    g.link(doc_id, Rel::Contains, host_para_id, Some(0));
+    g.link(doc_id, Rel::Contains, ref_para_id, Some(1));
+
+    let out = render_to_typst(&g, doc_id, "fallback").unwrap();
+    // 素の `[...]` ではなく `#[...]` になっていること(バグ1の核心)。
+    assert!(
+        out.contains(&format!("#[昇格したスパン] <{}>", anchor_id.0)),
+        "anchor content block must use `#[...]` so the trailing label attaches to it: {out}"
+    );
+    // Ref 側は通常どおり同じ label を指す `#link` になる。
+    assert!(out.contains(&format!("#link(<{}>)[こちら]", anchor_id.0)), "{out}");
+
+    assert_typst_compiles(&out, "anchor-ref-labelled-content-block");
+}
+
+/// Anchor ノードを render のルートとして直接描画するケース(単体テストの既存慣習
+/// — `render_to_typst(&g, anchor_id, ...)`)。block 側の `NodePayload::Anchor` 枝
+/// (`render_node`)も同じ `#[...] <label>` パターンに直してあることを確認する。
+#[test]
+fn anchor_rendered_as_root_uses_labelled_content_block() {
+    let anchor_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(anchor_id, NodePayload::Anchor(strata_core::Anchor { inline: vec![Inline::Text { s: "ルート直描画".into() }] })));
+
+    let out = render_to_typst(&g, anchor_id, "fallback").unwrap();
+    assert!(out.contains(&format!("#[ルート直描画] <{}>", anchor_id.0)), "{out}");
+
+    assert_typst_compiles(&out, "anchor-root-labelled-content-block");
+}
+
+// --- バグ2回帰(docs/secondary-bugs-handoff.md): render → typst compile の失敗 ----
+//
+// 当初の想定は「インラインコード(`` `...` ``)内のバックスラッシュエスケープ漏れ」
+// だったが、`render --format typst` → `typst compile` の実地再現(ハンドオフの指示
+// どおり)で実際に確定した原因は3つあった:
+// 1. インラインコード(raw span)の中身に markup 用エスケープ(`typst_escape`)を通して
+//    いたため、生テキストの `\` が二重にエスケープされ表示が壊れる(コンパイル自体は
+//    通るケースが多いが、ハンドオフが名指しした症状そのもの)。
+// 2. GFM 表セルのような「インライン解析されない生テキスト」に対応しない単独の `[`/`]`
+//    が含まれると、Typst の `[...]` content-block 引数のブラケット対応が崩れて
+//    `unclosed delimiter` になる(docs/handoffs/sml-fmt-m2-handoff.sml で実際に発生)。
+// 3. SML が単語内部の `_..._`/`*...*` も emphasis として解釈しうるため、Typst 側の
+//    同記法へそのまま変換すると Typst 自身の flanking 判定が破綻し `unclosed delimiter`
+//    になる(docs/handoffs/graph-ui-g1-handoff.sml 等で実際に発生)。
+
+#[test]
+fn inline_code_backslash_content_is_not_double_escaped() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "エスケープ(".into() },
+            Inline::Emph { kind: EmphKind::Code, children: vec![Inline::Text { s: "\\*".into() }] },
+            Inline::Text { s: " 等)".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    // raw span の中身は無加工の "\*"(2文字)のまま埋め込まれる。
+    assert!(out.contains("`\\*`"), "{out}");
+    assert!(!out.contains("\\\\\\*"), "inline code content must not be markup-escaped: {out}");
+
+    assert_typst_compiles(&out, "inline-code-backslash-not-double-escaped");
+}
+
+/// docs/handoffs/sml-fmt-m2-handoff.sml の実障害を最小再現: GFM 表セルのような
+/// インライン解析されない生テキストに、対応する閉じが無い単独の `[` が含まれる場合。
+#[test]
+fn unmatched_literal_bracket_in_text_does_not_break_typst_compile() {
+    let table_id = NodeId::new();
+    let mut g = Graph::default();
+    let table = Table {
+        rows: vec![Dim { name: "r".into(), members: vec![Member { key: "a".into(), label: None, children: vec![] }] }],
+        cols: vec![Dim { name: "c".into(), members: vec![Member { key: "b".into(), label: None, children: vec![] }] }],
+        cells: vec![Cell {
+            row_path: vec!["a".into()],
+            col_path: vec!["b".into()],
+            value: CellValue::Text { v: "`[` の直後に挿入".into() },
+        }],
+        caption: None,
+    };
+    g.insert(Node::new(table_id, NodePayload::Table(table)));
+
+    let out = render_to_typst(&g, table_id, "fallback").unwrap();
+    assert!(out.contains("\\[") && out.contains("\\`"), "{out}");
+
+    assert_typst_compiles(&out, "unmatched-literal-bracket-in-table-cell");
+}
+
+/// docs/handoffs/graph-ui-g1-handoff.sml 等の実障害を最小再現: 単語内部の
+/// `_..._`(SML が intraword でも emphasis として解釈しうる)の開き側が、直前の
+/// ASCII 英数字と隙間無く隣接するケース(閉じ側は `.` — 非英数字)。
+#[test]
+fn intraword_emphasis_preceded_by_ascii_alnum_switches_to_explicit_call() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "docs/sml".into() },
+            Inline::Emph { kind: EmphKind::Em, children: vec![Inline::Text { s: "example".into() }] },
+            Inline::Text { s: "*.sml".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    // shorthand の `_..._` は flanking 判定が破綻しうるため、明示呼び出し
+    // `#emph[...]` に差し替わり、直後には(自身の chain 継続を防ぐため)guard が付く。
+    assert!(out.contains("#emph[example]/**/"), "{out}");
+    assert!(!out.contains("_example_"), "must not fall back to the fragile shorthand form: {out}");
+
+    assert_typst_compiles(&out, "intraword-emphasis-preceded-by-ascii-alnum");
+}
+
+/// docs/handoffs/context-m5a-handoff.sml 等の実障害を最小再現: 開き側は非英数字
+/// (`/`)で安全でも、閉じ側の直後が ASCII 英数字(語の続き)だと shorthand のままでは
+/// `unclosed delimiter` になるケース(`sml_example_formatted.sml` の
+/// `_example_formatted` — 閉じ `_` の直後が `f`)。開き側だけを守る設計では防げない
+/// ことを実地の `typst compile` で確認済みのため、閉じ側の危険も判定対象にしてある。
+#[test]
+fn intraword_emphasis_followed_by_ascii_alnum_switches_to_explicit_call() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "sml".into() },
+            Inline::Emph { kind: EmphKind::Em, children: vec![Inline::Text { s: "example".into() }] },
+            Inline::Text { s: "formatted.sml".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#emph[example]/**/formatted.sml"), "{out}");
+    assert!(!out.contains("_example_"), "{out}");
+
+    assert_typst_compiles(&out, "intraword-emphasis-followed-by-ascii-alnum");
+}
+
+/// 同上パターンの Strong(`*...*` 由来)版。
+#[test]
+fn intraword_strong_followed_by_symbol_switches_to_explicit_call() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "sml".into() },
+            Inline::Emph { kind: EmphKind::Strong, children: vec![Inline::Text { s: "example".into() }] },
+            Inline::Text { s: ".sml".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#strong[example]/**/"), "{out}");
+    assert!(!out.contains("*example*"), "must not fall back to the fragile shorthand form: {out}");
+
+    assert_typst_compiles(&out, "intraword-strong-followed-by-symbol");
+}
+
+/// 前後とも空白/CJK/句読点に囲まれている(危険な隣接が無い)場合は shorthand の
+/// `_..._`/`*...*` のまま出力され、`CHAIN_GUARD` も明示呼び出しへの書き換えも起きない
+/// (golden フィクスチャの `*12 ms*` のような既存の安全なケースを無用に汚さないための
+/// 方針。既存 `CHAIN_GUARD` と同じ「必要な箇所にだけ絞る」設計)。
+#[test]
+fn emphasis_surrounded_by_non_ascii_alnum_stays_shorthand() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "日本語".into() },
+            Inline::Emph { kind: EmphKind::Em, children: vec![Inline::Text { s: "example".into() }] },
+            Inline::Text { s: "。続き".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("日本語_example_。続き"), "{out}");
+    assert!(!out.contains("/**/"), "guard/explicit-call rewrite must not trigger when both sides are safe: {out}");
+    assert!(!out.contains("#emph["), "{out}");
+}
+
+/// 段落末尾(直後に何も続かない)で、直前だけが ASCII 英数字のケースも安全側に倒れず
+/// きちんと明示呼び出しへ差し替わることを確認する(次の断片が存在しない = `None` を
+/// 安全と誤判定しないこと)。
+#[test]
+fn emphasis_at_paragraph_end_preceded_by_ascii_alnum_switches_to_explicit_call() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Text { s: "v1".into() },
+            Inline::Emph { kind: EmphKind::Em, children: vec![Inline::Text { s: "beta".into() }] },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#emph[beta]"), "{out}");
+
+    assert_typst_compiles(&out, "emphasis-at-paragraph-end-preceded-by-ascii-alnum");
 }

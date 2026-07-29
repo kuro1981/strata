@@ -293,7 +293,13 @@ impl<'a> TypstRenderer<'a> {
             }
             NodePayload::Anchor(a) => {
                 let inner = self.render_inlines(&a.inline)?;
-                Ok(format!("[{}] <{}>", inner, label(node_id)))
+                // バグ1修正(docs/secondary-bugs-handoff.md): 先頭に `#` を伴わない素の
+                // `[...]` は Typst マークアップ上ただの literal な角括弧文字であり、
+                // content block を作らない(`typst query` で実証: 直後の `<label>` が
+                // `[...]` の中身にではなく最後の literal `]` トークンに付いてしまう)。
+                // `#[...]` と書いて初めて実際の content block になり、`<label>` が
+                // その中身(inner)へ正しく付く。
+                Ok(format!("#[{}] <{}>", inner, label(node_id)))
             }
             NodePayload::Document(_) => {
                 // 通常 Document はルートとしてのみ現れ、render_root が別経路で処理する
@@ -404,11 +410,33 @@ impl<'a> TypstRenderer<'a> {
 
     /// docs/typst-paren-bug-handoff.md: `#link(...)[...]` / `#strike[...]` のように
     /// 「chainable な呼び出し + 末尾 content ブロック」の形で終わる断片は、直後の断片が
-    /// `(` または `[` で始まると Typst に式の続きとして食われる(詳細は `CHAIN_GUARD` の
-    /// doc)。ここでは各インライン要素を「本体文字列」と「末尾が chainable か」に分けて
-    /// レンダリングし、実際に危険な隣接が発生する箇所にだけ `CHAIN_GUARD` を挟む
-    /// (無条件挿入すると golden フィクスチャのような「実際には隣接していない」箇所まで
-    /// 汚してしまうため、必要箇所に絞る設計にした — 最終報告参照)。
+    /// `(` / `[` / `.` で始まると Typst に式の続きとして食われる(詳細は `CHAIN_GUARD` の
+    /// doc。`.` はバグ2修正で追加 — 下記参照)。ここでは各インライン要素を「本体文字列」と
+    /// 「末尾が chainable か」に分けてレンダリングし、実際に危険な隣接が発生する箇所にだけ
+    /// `CHAIN_GUARD` を挟む(無条件挿入すると golden フィクスチャのような「実際には隣接
+    /// していない」箇所まで汚してしまうため、必要箇所に絞る設計にした — 最終報告参照)。
+    ///
+    /// バグ2修正(docs/secondary-bugs-handoff.md、当初の想定〈インラインコードの
+    /// バックスラッシュエスケープ漏れ〉とは別に `render --format typst` → `typst compile`
+    /// の実地再現で見つかった副産物)で2点追加した:
+    ///
+    /// 1. `.` も上記「chainable 呼び出しの直後は危険」の対象に追加した。`#link(...)[t].x`
+    ///    や `#strike[t].x` は field access(`.x`)として食われ `... does not have field
+    ///    "x"` になることを `typst compile` で確認した(`typst-paren-bug-handoff.md` 由来の
+    ///    既存 `CHAIN_GUARD` 機構自体に残っていた抜け穴)。
+    /// 2. Em/Strong の shorthand(`_..._`/`*...*`)は、SML 側が単語の内部
+    ///    (例: `sml_example_*.sml` の `_example_`)でも emphasis として解釈しうる
+    ///    (crates/strata-sml/src/inline.rs の delimiter run 判定は CommonMark の
+    ///    intraword `_` 制限を課さない)ため、そのまま Typst の同記法に変換すると
+    ///    開き/閉じいずれかの区切り文字が ASCII 英数字と隙間無く隣接する場合に Typst
+    ///    自身の flanking 判定が破綻し `unclosed delimiter` になる(`typst compile` で
+    ///    実証: `sml_example_.sml` や `sml_example_x.sml`〈直前ガード有りでも直後が
+    ///    英数字だと失敗〉。一方 CJK・空白・句読点で挟まれている場合は元々安全 — 例:
+    ///    golden フィクスチャの `*12 ms*`)。安全なケースまで一律書き換えると
+    ///    golden を無用に汚すため、危険な場合(前後どちらかが ASCII 英数字と隙間無く
+    ///    隣接)にだけ、flanking 判定を経由しない明示呼び出し `#emph[...]`/`#strong[...]`
+    ///    に差し替え、その呼び出し自身の chain 継続(上記1.と同じ危険)を防ぐため
+    ///    無条件に直後へ `CHAIN_GUARD` を付ける。
     fn render_inlines(&mut self, inlines: &[Inline]) -> Result<String, String> {
         let mut fragments: Vec<(String, bool)> = Vec::with_capacity(inlines.len());
         for inline in inlines {
@@ -417,10 +445,31 @@ impl<'a> TypstRenderer<'a> {
 
         let mut out = String::new();
         for i in 0..fragments.len() {
-            out.push_str(&fragments[i].0);
+            let text = fragments[i].0.as_str();
+
+            let shorthand_emph_inner = text.strip_prefix('_').and_then(|s| s.strip_suffix('_'));
+            let shorthand_strong_inner = text.strip_prefix('*').and_then(|s| s.strip_suffix('*'));
+            if let Some((inner, wrapper)) = shorthand_emph_inner
+                .map(|inner| (inner, "emph"))
+                .or_else(|| shorthand_strong_inner.map(|inner| (inner, "strong")))
+            {
+                let prev_dangerous = out.chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric());
+                let next_dangerous = fragments
+                    .get(i + 1)
+                    .and_then(|(next, _)| next.chars().next())
+                    .is_some_and(|c| c.is_ascii_alphanumeric());
+                if prev_dangerous || next_dangerous {
+                    out.push_str(&format!("#{wrapper}[{inner}]"));
+                    out.push_str(CHAIN_GUARD);
+                    continue;
+                }
+            }
+
+            out.push_str(text);
             let ends_chainable = fragments[i].1;
-            let next_starts_dangerous =
-                fragments.get(i + 1).is_some_and(|(next, _)| next.starts_with('(') || next.starts_with('['));
+            let next_starts_dangerous = fragments
+                .get(i + 1)
+                .is_some_and(|(next, _)| next.starts_with('(') || next.starts_with('[') || next.starts_with('.'));
             if ends_chainable && next_starts_dangerous {
                 out.push_str(CHAIN_GUARD);
             }
@@ -434,12 +483,26 @@ impl<'a> TypstRenderer<'a> {
     fn render_inline_fragment(&mut self, inline: &Inline) -> Result<(String, bool), String> {
         Ok(match inline {
             Inline::Text { s } => (typst_escape(s), false),
+            Inline::Emph { kind: EmphKind::Code, children } => {
+                // バグ2修正(docs/secondary-bugs-handoff.md): Typst の raw span
+                // (`` `...` ``)は verbatim — バックスラッシュを含め一切のエスケープ処理を
+                // しない。`typst_escape`(マークアップ用エスケープ)を通すと、SML 側の
+                // 生テキストに含まれる `\` がそのまま raw span 内の literal 文字として
+                // 二重にエスケープされて現れてしまう(実例: 生テキスト `` `\*` `` の中身
+                // "\*"(2文字)が `typst_escape` を経由すると "\\\*"(4文字)になり、
+                // コンパイルは通っても表示が壊れる — `docs/handoffs/md-render-handoff.sml`
+                // 「エスケープ(`\*` 等)」で確認)。code span の中身は
+                // crates/strata-sml/src/inline.rs のパーサ側でネスト不可・常に単一の
+                // `Text` ノードと決まっている(バッククォート自体も中に来ない)ため、
+                // `plain_text` で無加工のまま取り出して埋め込む。
+                (format!("`{}`", self.plain_text(children)), false)
+            }
             Inline::Emph { kind, children } => {
                 let inner = self.render_inlines(children)?;
                 match kind {
                     EmphKind::Strong => (format!("*{}*", inner), false),
                     EmphKind::Em => (format!("_{}_", inner), false),
-                    EmphKind::Code => (format!("`{}`", inner), false),
+                    EmphKind::Code => unreachable!("handled above"),
                     // M6(D40 Tier2): 取消線。`#strike[...]` は chainable。
                     EmphKind::Strike => (format!("#strike[{}]", inner), true),
                 }
@@ -453,13 +516,17 @@ impl<'a> TypstRenderer<'a> {
             Inline::Anchor { to } => {
                 let text = if let Some(NodePayload::Anchor(a)) = self.graph.nodes.get(to).map(|n| &n.payload) {
                     let inner = self.render_inlines(&a.inline)?;
-                    format!("[{}] <{}>", inner, label(*to))
+                    // バグ1修正(docs/secondary-bugs-handoff.md): `#[...]` で実際の
+                    // content block を作らないと `<label>` がラベル対象化されない
+                    // (block-level の NodePayload::Anchor 枝と同じ理由。そちらの doc
+                    // comment 参照)。
+                    format!("#[{}] <{}>", inner, label(*to))
                 } else {
                     String::new()
                 };
-                // 素の `[...]`(先頭に `#` を伴わない)は Typst の呼び出し連鎖を形成しない
-                // (単なるリテラルの角括弧文字として扱われる。`typst compile` で確認済み)
-                // ため chainable ではない。
+                // `#[...]<label>` は `<label>` トークンで閉じるため、直後に `(`/`[` が
+                // 来ても呼び出し連鎖にはならない(`typst compile` で確認済み。Section/
+                // Para 等、既存の全ブロックラベルと同じ理由で non-chainable)。
                 (text, false)
             }
             // M6(D40): 外部リンク → Typst の #link(URL)[表示テキスト]。chainable。
@@ -930,6 +997,20 @@ fn typst_escape(s: &str) -> String {
         .replace('@', "\\@")
         .replace('#', "\\#")
         .replace('&', "\\&")
+        // バグ2修正(docs/secondary-bugs-handoff.md、`typst compile` の実地再現で確定
+        // させた対象): `[`/`]` は「呼び出し引数の content block」を作る Typst の構文
+        // トークンで、コード式(`#figure(... table(... [セル値] ...))` のようなセル値
+        // ラップ等)の内側では対応するペアの数がずれると `unclosed delimiter` になる
+        // (`typst compile` で実証: `#box([a[b\]c])` のように片方だけエスケープすると
+        // 対応が崩れて失敗し、`#box([a[b]c])` のように両方エスケープ無しなら成功する。
+        // 一方セルの生テキストが「対応しない単独の `[`」を含むケース、例えば
+        // `docs/handoffs/sml-fmt-m2-handoff.sml` の「`[` の直後に `id=ULID, ` を挿入」
+        // という GFM 表セルは対応する `]` が同じセル内に存在せず、エスケープ無しだと
+        // 表全体が unclosed になっていた)。バランス追跡は複雑さの割に得るものが
+        // 少ないため、他の記号(`<`/`>`/`@`/`#`/`&`)と同様に常時エスケープする方針にした
+        // (裁量、最終報告参照)。
+        .replace('[', "\\[")
+        .replace(']', "\\]")
 }
 
 /// Typst の文字列リテラル(`"..."`)向けのエスケープ。マークアップエスケープとは
