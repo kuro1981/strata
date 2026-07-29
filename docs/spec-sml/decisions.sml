@@ -477,3 +477,165 @@ AI 向けコンテキストビューの専用サブコマンド `strata context 
 
 [id=01KXJR7K8EPXBEFCBZ0EXAK64P, depends-on=d32]
 起草文法を以下の修正の上で批准: (1) **糖衣構文** — 裸文字列 `alias.キー` を record フィールド抽出の略記とする(完全形へ機械的に脱糖。定義の8割を占める共通ケースの可読性が v1 の本丸のため)。(2) **`rename` を `pick` に改名**(実態は値の抽出でありリネームではない)。`extend-path` は強力だが非自明なため文書の説明強化で許容。**`template`/`concat`(複数値の糊付け)コンビネータは見送り**(§10 保留に登録 — [D32](ref:d32) の「追加は裁定を経る」運用の初適用。実需が出た時点で再裁定)。
+
+## グラフ UI G1 + rel 語彙(2026-07-15 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9AX alias=g1-graph-ui}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9AY, alias=g1-graph-ui-intro]
+ゴールの再確認(ユーザー): **AI も人も読めるドキュメント構造とリッチコンテンツの共存**の上に、**Obsidian の替わり**(ローカル vault・グラフを見ながら文書を読み、文書からまたグラフへ戻る往復体験・編集)を作る。差別化: Obsidian のグラフは無型リンク網、Strata は**型付きエッジ+型付きコンテンツ**。
+
+### D48 rel `revises` 追加 {#01KYP2K28MRTEH7ZWSQN2CG9AZ alias=d48}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B0, alias=d48-topic]
+論点は、rel `revises` 追加である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B1, alias=d48-decision]
+M8 の境界事例8件(追認・明文化・再裁定・実装裁定)への裁定。**`revises` を1個だけ追加**(A revises B = A は B を改定・追認・精密化・明文化する。方向は新→旧)。`ratifies` 等への細分・ユーザー定義 rel 機構は不採用(rel は全消費者が意味を理解すべき語彙なので最小に保つ — [D32](ref:d32) と同思想)。属性行キー `revises=`、build エッジ、context 表示、UI 描画に波及。描画方針は supports 等と同じ(紙面には出さない意味エッジ)。
+
+### D49 グラフ UI フェーズの定義 {#01KYP2K28MRTEH7ZWSQN2CG9B2 alias=d49}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B3, alias=d49-topic]
+論点は、グラフ UI フェーズの定義である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B4, alias=d49-decision]
+「グラフ UI」の正体は **Obsidian 代替の閲覧半分を、後で Tauri に載る形で先に作る**フェーズと再定義。**G1(今回)**: UI コア=**2ペインの往復**(グラフペイン ⇄ 文書ペイン、選択同期、型付きエッジを辿る)。読み専用。配布は静的エクスポート **`strata site`**(自己完結・サーバ不要)。**G2(次)**: Tauri シェル+編集 — バックエンドが Rust なので strata クレート群をプロセス内で直接呼べる(保存→fmt→再build→グラフ即時更新)。静的サイトは G2 以降も公開・共有形態として存続。v0 スコープ: decisions・履歴書の両ワークスペースが映る/エッジ辿り(revises 込み)/class 表示トグル/alias・ULID ジャンプ。検索・編集・力学レイアウトは以降。
+
+### D50 UI 技術スタック {#01KYP2K28MRTEH7ZWSQN2CG9B5 alias=d50}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B6, alias=d50-topic]
+論点は、UI 技術スタックである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B7, alias=d50-decision]
+**shadcn/ui(React + Tailwind + Vite)**(ユーザー裁定「shadcn でいいんじゃないか説」)。**動的 SPA**(ユーザー裁定: Astro 等の静的ページ生成ではなく、graph JSON をクライアントで読み込み描画・同期・辿りを行う動的アプリ。「静的」は配布形態=サーバ不要のファイル群、の意)。Tauri フロントエンドの定番構成で G2 に直結。**自己完結を維持**(CDN・外部フォント依存なし)。リポジトリに `ui/` を新設(Node ワークスペース。Rust クレートとは分離)。`strata site` はビルド済み UI 資産+graph JSON を出力ディレクトリに合成する。
+
+### D51 グラフペインの LOD(G1.5) {#01KYP2K28MRTEH7ZWSQN2CG9B8 alias=d51}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9B9, alias=d51-topic]
+論点は、グラフペインの LOD(G1.5)である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BA, alias=d51-decision]
+G1 目視評価(ユーザー: 「関係グラフは良いが**小さい。長い文書だと読めない**」)への裁定。全ブロック常時描画をやめ、**詳細度の二層**にする: (1) **ローカルグラフ(既定)** — 選択ノード中心に意味エッジ近傍 1〜2 ホップ+contains 親パスのみを常に読めるサイズで描く(Obsidian のローカルグラフ相当、`context --node` のビジュアル版)。(2) **俯瞰(トグル)** — セクション粒度に集約し、ブロック間エッジはセクション間に束ねて本数を太さで表現。現行の全展開アウトラインはオプションに降格。あわせてユーザーの感触「**Zettelkasten 的な関係が作れそう**」(型付きリンク+安定アドレス+term 合流が既にカード間リンクの機構)を受け、**Zettelkasten ドッグフーディング**(notes ワークスペースでの実運用)を G2 の要件出しとして開始する。
+
+## notes ドッグフーディング裁定(2026-07-16 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9BB alias=notes-dogfooding}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BC, alias=notes-dogfooding-intro]
+Zettelkasten 検証(~/dev/strata-notes)で発見した摩擦2件への裁定。
+
+### D52 リスト継続行(lazy continuation) {#01KYP2K28MRTEH7ZWSQN2CG9BD alias=d52}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BE, alias=d52-topic]
+論点は、リスト継続行(lazy continuation)である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BF, alias=d52-decision, depends-on=[d39, d40]]
+**CommonMark 準拠で継続行を項目本文に併合する**(M6 監査②の取りこぼし。折り返し付きリストは素の MD の日常表現なので、[D39](ref:d39) により診断で弾く選択肢は無い)。「項目=段落1つ」の制約は維持 — その段落が複数ソース行にまたがれるようになるだけ。fmt の `{#id}` タグは項目の**最終行末尾**(Setext・[D40](ref:d40) と同型)。空行は従来どおりブロック境界。
+
+### D53 `doc:` スキーム {#01KYP2K28MRTEH7ZWSQN2CG9BG alias=d53}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BH, alias=d53-topic]
+論点は、`doc:` スキームである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BJ, alias=d53-decision]
+文書そのものを指す**新参照スキーム `doc:<文書alias>`**(Document ノード直指し)。`ref:<文書alias>` の裸解決に文書フォールバックを足す案は不採用 — ブロック alias との衝突時に暗黙の優先順位が生まれ [D42](ref:d42) の明快さを崩すため。既存スキーム族(`ref:`/`table:`/…)と同じ作法の明示的な1語彙。単一ファイル build では自文書 alias のみ解決可、他文書は CrossDocRef 同様の `--workspace` 案内。notes の「H1 に alias=top」規約はこれで不要になる(撤去)。
+
+## G2(エディタ)設計決定(2026-07-16 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9BK alias=g2-editor}
+
+### D54 エディタの分離(疎結合境界) {#01KYP2K28MRTEH7ZWSQN2CG9BM alias=d54}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BN, alias=d54-topic]
+論点は、エディタの分離(疎結合境界)である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BP, alias=d54-decision]
+**エディタは別リポジトリ**(ユーザー裁定: 「密結合すると、代替フォーマットの意味なくなる」)。strata リポジトリ=フォーマット+ツールチェーン(クレート・CLI・リファレンスビューア ui/+site)で、エディタ無しで全機能が完結し続ける。エディタ(strata-editor、Tauri)は**公開境界のみ**に依存: Rust=クレートの path/git 依存、データ=graph JSON スキーマ、フロント=ui/ ビューアの外部参照(v0 は file 依存/submodule、将来パッケージ化)。Obsidian と Markdown の距離感。
+
+### D55 編集ループ {#01KYP2K28MRTEH7ZWSQN2CG9BQ alias=d55}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BR, alias=d55-topic]
+論点は、編集ループである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BS, alias=d55-decision, depends-on=d42]
+T1: **内蔵エディタ(CodeMirror 6)**+ファイルウォッチ併存。T2: 保存 → fmt を**インメモリ実行しエディタバッファへパッチ適用**(ID がその場で生える。fmt が直接ファイルを書いてバッファと衝突させない)→ ディスク書き込み → **デバウンス付きバックグラウンド workspace build** → グラフ即時更新。build 失敗時は **last-good グラフを表示し続け**、診断パネル(行ジャンプ付き)に出す。編集中の即時フィードバックは単一ファイル parse レベル(build 不要)の二段構え。**毎回フル build は思想的に義務ではない**([D42](ref:d42): index は派生・使い捨てで、再構築のタイミングは消費者の自由。大規模化したら §10 のインクリメンタル index を裁定 — API 境界は文書単位の再パースを最初から許す形に)。T3: vault=strata.toml を開く・最近使った vault・新規カード雛形・daily ショートカット。T5(v0 スコープ): 開く/読む(G1 UI)/編集/T2 ループ/新規カード/daily。検索・バックリンクパネル・コマンドパレットは v1。
+
+## 検索とコマンドパレット(2026-07-20 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9BT alias=search-palette}
+
+### D56 検索 {#01KYP2K28MRTEH7ZWSQN2CG9BV alias=d56}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BW, alias=d56-topic]
+論点は、検索である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BX, alias=d56-decision]
+v0 の種類: ①クイックスイッチャー(文書・見出し・alias)②全文検索(ブロック単位ヒット+スニペット)③構造述語の最小形(`class:`/`term:`/`alias:` プレフィックス — 型付きグラフゆえ述語が本物)。**実装は strata 側のライブラリ+CLI `strata search`**(ユーザー裁定「search は CLI 側」)— エディタは Rust 直呼び([D54](ref:d54))、AI エージェントは grep の代わりに使える第二の読み取り接点(執筆ガイドに追記)。**index は v0 インメモリ**(現規模で ms オーダー。「使ってから裁定」の文化どおり永続化は実測で遅くなってから — ただし検索 API の境界は index 実装差し替え可能に切る)。ヒット単位=ブロック、表示は人間可読ラベル+スニペット(G1.7 ポリシー)、CJK は部分文字列一致。**グラフ探索クエリ(パス・パターン)と vector/埋め込み検索の扱いは将来検討**(§10 へ登録、ユーザー指示)。
+
+### D57 コマンドパレット先行 {#01KYP2K28MRTEH7ZWSQN2CG9BY alias=d57}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9BZ, alias=d57-topic]
+論点は、コマンドパレット先行である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C0, alias=d57-decision]
+エディタは**コマンドパレットを検索より先に実装**(ユーザー裁定「コマンドもそこで育てないといけない」)。パレット=コマンド登録基盤(ID・表示名・キーバインド・実行)であり、既存操作(新規カード・今日のノート・保存・モード切替・class トグル・vault 切替等)をコマンド化して収容。クイックスイッチャーと全文検索は**パレットのモード**として実装(Obsidian と同型)。以後の新機能は原則コマンドとして追加し、パレットが機能の索引を兼ねる。
+
+## ビュー定義の追補(2026-07-20 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9C1 alias=view-def-addendum}
+
+### D58 rows の class フィルタ {#01KYP2K28MRTEH7ZWSQN2CG9C2 alias=d58}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C3, alias=d58-topic]
+論点は、rows の class フィルタである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C4, alias=d58-decision, depends-on=[d46, d32]]
+ユーザーフィードバック(初のフィードバック運用: 受け皿は GitHub Issues、§10 は裁定後の保留正典): `rows: contains` に `include-only-class` / `exclude-class` が無く、join では可能な「note クラスのセクション全体を submit から除外」が行反復でできない。**join と同一の語彙・同一のセマンティクス([D46](ref:d46) 実効 class)で `rows` に両フィルタを追加**する(コンビネータ新設ではなく既存コンビネータの適用範囲の一貫化 — [D32](ref:d32) の運用に整合)。`rows: table` モードへの適用は行キーが class を持たないため対象外(裁量確認の上、対象外なら文書に明記)。
+
+## Obsidian 互換(2026-07-29 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9C5 alias=obsidian-compat}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C6, alias=obsidian-compat-intro]
+実 Obsidian vault(`kurochanBrainPrivate`、304ファイル)を Strata 統合するドッグフーディングで発見した致命的互換性ギャップへの裁定。
+
+### D59 `[[wikilink]]` 対応 {#01KYP2K28MRTEH7ZWSQN2CG9C7 alias=d59}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C8, alias=d59-topic]
+論点は、`[[wikilink]]` 対応である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9C9, alias=d59-decision, depends-on=d2]
+Obsidian の `[[ページ名]]`(304ファイル中100で使用、無診断でリテラルテキスト化=「静かに壊れる」)を新規対応する。**解決方式はワークスペース内の文書タイトル/ファイル名との一致による自動解決**(ユーザー裁定)。alias 付与不要で既存ファイルを無修正のまま移行できる利点を優先。同名衝突(複数文書が同じタイトル)は曖昧エラー(diagnostic、全か無か)。パイプ形式 `[[target|表示テキスト]]` も対応。埋め込み `![[...]]` は別途(§10 保留、当面プレーンなリンクとして扱うか要検討)。canonical グラフでは他の Ref 同様、解決後は対象ノードへの通常の Ref(rel=refers-to)になる — wikilink というソース記法の情報は保持しない([D2](ref:d2) の ID 無視同型と同じ「表層記法は正規化される」原則)。
+
+## Obsidian frontmatter 統合(2026-07-29 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9CA alias=obsidian-frontmatter}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CB, alias=obsidian-frontmatter-intro]
+[D59](ref:d59) 実装で実 vault の frontmatter 実態を調査した結果、64/38/38/38/38/38/14+ 件など少数の一貫したスキーマ(Web クリッパー・タグ・Excalidraw プラグイン設定)に整理できることが判明。frontmatter は「分類」だけでなく「記述的事実」「実行条件(プラグイン設定)」の3種が混在する汎用プロパティ系である、という認識のもとに裁定。
+
+### D60 未知 frontmatter キーの重大度 {#01KYP2K28MRTEH7ZWSQN2CG9CC alias=d60}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CD, alias=d60-topic]
+論点は、未知 frontmatter キーの重大度である。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CE, alias=d60-decision, depends-on=d17]
+`UnknownFrontmatterKey` を **Error → Warning** に格下げる(`UnknownAttrKey`([D17](ref:d17))と同型)。fmt/build は未知キーを持つファイルを拒否しなくなる(全か無かの対象外)。バイトは温存、frontmatter 自体は書き換えない([D6](ref:d6) の純挿入・冪等は不変)。実質的な安全網 — ここより先の [D61](ref:d61)/[D62](ref:d62) が無くても既存ファイルの取り込みが塞がれない。
+
+### D61 frontmatter の意味付けは宣言的マッピングで — 固定変換はしない {#01KYP2K28MRTEH7ZWSQN2CG9CF alias=d61}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CG, alias=d61-topic]
+論点は、frontmatter の意味付けは宣言的マッピングで行い、固定変換はしないことである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CH, alias=d61-decision, depends-on=[d46, d28]]
+frontmatter キーは**分類**(tags/status 等 → [D46](ref:d46) `class` 機構)・**記述的事実**(author/source/created 等 → [D28](ref:d28) `record`)・**実行条件**(プラグイン設定等 → 意味を持たせず無視)の3種に分かれるが、**Strata がどれかに決め打ちしない**。vault ごとに**宣言的マッピング仕様**(YAML、view-def-v1.md と同じ思想 — 固定コンビネータ `as: class` / `as: record` / `as: ignore` のみ、スクリプトなし)を書き、それに従って変換する。「ユーザーの自由度」はこのマッピングファイルの中に住む。frontmatter に4番目のキー `class:`([D46](ref:d46) 実効 class、文書全体に効く)を追加 — マッピングの `as: class` の着地点。マッピング仕様の文法は実装時に起草。
+
+### D62 インポート能力の置き場所 — まずスキル、ツールは将来 {#01KYP2K28MRTEH7ZWSQN2CG9CJ alias=d62}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CK, alias=d62-topic]
+論点は、インポート能力の置き場所であり、まずスキル、ツールは将来とすることである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CM, alias=d62-decision, depends-on=d37]
+Obsidian → SML の変換は**まず AI エージェント駆動のスキル**として提供する(新規 Rust バイナリを今は作らない)。既存の [D37](ref:d37) (AI が SML を書き fmt/build が検証)と M5-C(AI がバインディング案を出し人間が批准)をそのまま流用: AI が vault の frontmatter 実態を調査 → [D61](ref:d61) のマッピング仕様を提案 → 人間が批准 → その仕様に従って AI が各ファイルを SML ドラフトに変換 → fmt/build で検証。決定的ツールへの昇格は、view-def([D30](ref:d30)〜[D35](ref:d35))と同じく実運用で型が安定してから判断する(「使ってから裁定」)。
+
+## パイロット移行(00_Daily 34件・Clippings 47件)の裁定(2026-07-29 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9CN alias=obsidian-pilot-migration}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CP, alias=obsidian-pilot-migration-intro]
+[D62](ref:d62) のスキルを実運用で試したドッグフーディング(kurochanBrainPrivate から非破壊コピーした2バッチ、実 vault は無変更)で発見した不具合・仕様の穴への裁定。
+
+### D63 マッピング仕様に `split` コンビネータを追加 {#01KYP2K28MRTEH7ZWSQN2CG9CQ alias=d63}
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CR, alias=d63-topic]
+論点は、マッピング仕様に `split` コンビネータを追加することである。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CS, alias=d63-decision, depends-on=d32]
+Web クリッパー系プラグインは複数タグを1リスト項目に空白区切りで詰める(`tags: ["clippings RAG tools"]`)ことがあり、これを機械的に `as: class` へ流すと `class:` の字句規則(`[A-Za-z0-9_-]+`)に反し `BadClass` で build が落ちる(実データで確認)。**マッピング仕様(`docs/obsidian-import-mapping.md`)に `split: whitespace` オプションを追加**し、`as: class` と組み合わせて「1項目を空白分割してから複数 class として展開」を宣言できるようにする。固定コンビネータの追加は [D32](ref:d32) の運用どおり実需(今回)を経ての裁定。
+
+[id=01KYP2K28MRTEH7ZWSQN2CG9CT, alias=obsidian-pilot-migration-completion]
+**完了の定義**: 上記に加え、パイロットで発見した CLI バグ(`strata fmt` の一時ファイル名が元ファイル名に依存し NAME_MAX 超過で失敗する — 実データで4/47件が該当)を修正し、`docs/obsidian-import-skill.md`・`docs/obsidian-import-mapping.md`・`docs/sml-agent-guide.md` をパイロットのフィードバック(CRLF・wikilink未解決時の扱い・優先順位の明記・frontmatter4キー目の追随・H1合成指針・値のクォート規則差)で更新する。

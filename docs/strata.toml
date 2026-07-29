@@ -1,0 +1,2 @@
+[workspace]
+members = ["spec-sml/**/*.sml", "guides/*.sml", "handoffs/*.sml"]

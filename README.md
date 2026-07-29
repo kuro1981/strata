@@ -12,7 +12,7 @@ Markdown file is already a valid SML draft.
 設計されており、素の `.md` ファイルはそのまま有効な SML ドラフトになる。
 
 55件以上の設計対話を経て今のかたちに至っている。判断の経緯を追いたい場合は
-`docs/sml-spec.md` §1(D1〜D58 の裁定一覧)と `Plans.md` / git log を参照。
+`docs/spec-sml/decisions.sml`(D1〜D63 の裁定一覧)と `Plans.md` / git log を参照。
 
 ---
 
@@ -37,7 +37,7 @@ Strata は3層モデルで構成される。
 - **ワークスペース**(`strata.toml`、`members` のグロブ列挙)で複数の `.sml`
   ファイルを束ね、ファイル横断の参照(`ref:<文書alias>/<ブロックalias>`、
   `doc:<文書alias>`)を解決できる。
-- **ビュー定義**(YAML、`docs/view-def-v1.md`)は canonical グラフから
+- **ビュー定義**(YAML、`docs/guides/view-def-v1.sml`)は canonical グラフから
   テンプレート消費用のデータファイルを宣言的に取り出す仕組み。セレクタ
   (alias / class / セル座標 / 型+contains パス)とコンビネータ(rename・
   rows・join・date・age・concat 等)の組み合わせのみで、スクリプトや正規表現は
@@ -115,15 +115,18 @@ cargo run -p strata-cli -- site --workspace docs/spec-sml/strata.toml -o out/sit
 
 | ドキュメント | 位置づけ |
 |---|---|
-| `docs/sml-spec.md` | **正典 (normative)**。§1 に D1〜D58 の裁定一覧(設計決定の記録)、以降にブロック分類・ID規則・文法・処理パイプラインなど |
-| `docs/sml-agent-guide.md` | AI エージェント向けの SML 執筆ガイド(これだけ読めば書けることを品質基準とする実用要約) |
-| `docs/view-def-v1.md` | ビュー定義 YAML の文法(D30〜D35) |
-| `docs/*-handoff.md` | 各マイルストーンの実装ハンドオフ(設計決定→実装への橋渡し) |
+| `docs/spec-sml/decisions.sml` | **正典 (normative)**。D1〜D63・P1〜P4 の裁定一覧(設計決定の記録) |
+| `docs/spec-sml/grammar.sml` | **正典 (normative)**。ブロック分類・ID規則・文法・処理パイプライン・凍結/保留事項 |
+| `docs/guides/sml-agent-guide.sml` | AI エージェント向けの SML 執筆ガイド(これだけ読めば書けることを品質基準とする実用要約) |
+| `docs/guides/view-def-v1.sml` | ビュー定義 YAML の文法(D30〜D35) |
+| `docs/handoffs/*.sml` | 各マイルストーンの実装ハンドオフ(設計決定→実装への橋渡し) |
 | `Plans.md` / git log | 初期構想〜マイルストーン計画の履歴(現状と乖離している箇所もある一次資料) |
 
-`docs/` にはこの他、互換性監査(`md-compat-audit.md`)やパーサ設計メモなど
-実装過程の資料が置かれている。読む場所に迷ったら `sml-spec.md` §1 から入り、
-関心のある Dn の周辺ドキュメントへ辿るのが早い。
+`docs/guides/` にはこの他、互換性監査(`md-compat-audit.sml`)やパーサ設計メモなど
+実装過程の資料が置かれている(いずれも SML 化済み、`docs/strata.toml` のワーク
+スペースメンバー)。読む場所に迷ったら `docs/spec-sml/decisions.sml` から入り、
+関心のある Dn の周辺ドキュメントへ辿るのが早い(`strata render` / `strata site`
+でも閲覧できる)。
 
 ## strata-editor(別リポジトリ)
 
@@ -137,8 +140,8 @@ Strata の全機能(CLI・ビュー・検索・静的サイト出力)は完結�
 ## フィードバック
 
 不具合報告・提案は [GitHub Issues](https://github.com/kuro1981/strata/issues)
-へ。Strata の機能追加は「Issue → 設計対話で裁定(`sml-spec.md` §1 に Dn として
-凍結)→ 実装 → Issue を Closes」という流れで進む。運用の詳細は
+へ。Strata の機能追加は「Issue → 設計対話で裁定(`docs/spec-sml/decisions.sml`
+に Dn として凍結)→ 実装 → Issue を Closes」という流れで進む。運用の詳細は
 [CONTRIBUTING.md](CONTRIBUTING.md) を参照。
 
 ## ライセンス

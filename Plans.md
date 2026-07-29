@@ -1,6 +1,6 @@
 # Strata 今後の開発計画 (Plans.md)
 
-本ドキュメントは、仕様書 `docs/strata-spec.md` に定義された仕様に基づき、Strata および SML (Strata Markup Language) の具現化に向けた実装フェーズの進め方を定義します。
+本ドキュメントは、仕様書 `docs/guides/strata-spec.sml` に定義された仕様に基づき、Strata および SML (Strata Markup Language) の具現化に向けた実装フェーズの進め方を定義します。
 
 ---
 

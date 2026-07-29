@@ -7,7 +7,7 @@ use strata_sml::Span;
 /// トップレベル CLI。`fmt` / `build` / `render` サブコマンドを提供する(旧 YAML→HTML
 /// フローは M4 の vault 削除(docs/sml-render-m4-handoff.md D-R1)で撤去済み)。
 /// `render` は canonical グラフ(層2)から Typst マークアップ(既定)または
-/// 素の Markdown/GFM(`--format md`、sml-spec.md §1.8 D38)を直接出力する
+/// 素の Markdown/GFM(`--format md`、docs/spec-sml/decisions.sml §1.8 D38)を直接出力する
 /// (D-R3。中間 JSON は介さない。strata-html への導線は持たない — D19)。
 #[derive(Parser, Debug)]
 #[command(author, version, about = "Strata Document Builder CLI", long_about = None)]
@@ -26,20 +26,20 @@ enum Command {
     /// D38). Build + render, no intermediate JSON.
     Render(RenderArgs),
     /// Apply a declarative view definition to an SML file's canonical graph,
-    /// producing template-consumable data files (YAML). See docs/view-def-v1.md.
+    /// producing template-consumable data files (YAML). See docs/guides/view-def-v1.sml.
     View(ViewArgs),
     /// Serialize an SML file's canonical graph into an AI-readable context view
     /// (ULID-addressable Markdown + semantic edge listing, D36). See
-    /// docs/context-m5a-handoff.md.
+    /// docs/handoffs/context-m5a-handoff.sml.
     Context(ContextArgs),
     /// Build a self-contained static site: graph.json (build output, normalised to a
     /// uniform shape for both single-file and --workspace) + the pre-built graph-UI
-    /// SPA (`ui/dist`), combined into one output directory (G1 WS-B, sml-spec.md
-    /// §1.13 D49/D50). See docs/graph-ui-g1-handoff.md.
+    /// SPA (`ui/dist`), combined into one output directory (G1 WS-B, docs/spec-sml/decisions.sml
+    /// §1.13 D49/D50). See docs/handoffs/graph-ui-g1-handoff.sml.
     Site(SiteArgs),
     /// Search an SML file's (or workspace's) canonical graph: plain-text substring
     /// matching plus structural predicates (`class:`/`term:`/`alias:`, space-separated
-    /// AND), block-level hits with snippets (D56, sml-spec.md §1.16). See
+    /// AND), block-level hits with snippets (D56, docs/spec-sml/decisions.sml §1.16). See
     /// strata-search.
     Search(SearchArgs),
 }
@@ -60,7 +60,7 @@ struct BuildArgs {
     file: Option<PathBuf>,
 
     /// Build a workspace instead of a single file: path to a strata.toml
-    /// (D41/D43, docs/sml-spec.md §1.10). Mutually exclusive with `file`.
+    /// (D41/D43, docs/spec-sml/decisions.sml §1.10). Mutually exclusive with `file`.
     #[arg(long)]
     workspace: Option<PathBuf>,
 
@@ -82,7 +82,7 @@ struct RenderArgs {
     file: Option<PathBuf>,
 
     /// Render a workspace instead of a single file: path to a strata.toml
-    /// (D44, sml-spec.md §1.11). Mutually exclusive with `file`. In this mode
+    /// (D44, docs/spec-sml/decisions.sml §1.11). Mutually exclusive with `file`. In this mode
     /// `-o` is always an output *directory* (default: current directory) —
     /// every rendered member is written as `<member file stem>.<ext>` inside it.
     #[arg(long)]
@@ -122,7 +122,7 @@ struct ViewArgs {
     #[arg(long)]
     workspace: Option<PathBuf>,
 
-    /// View definition YAML (D30〜D34, docs/view-def-v1.md)
+    /// View definition YAML (D30〜D34, docs/guides/view-def-v1.sml)
     #[arg(long = "view")]
     view: PathBuf,
 
@@ -152,7 +152,7 @@ struct ContextArgs {
     file: Option<PathBuf>,
 
     /// Serialize a workspace instead of a single file: path to a strata.toml
-    /// (D44, sml-spec.md §1.11). Mutually exclusive with `file`.
+    /// (D44, docs/spec-sml/decisions.sml §1.11). Mutually exclusive with `file`.
     #[arg(long)]
     workspace: Option<PathBuf>,
 
@@ -199,7 +199,7 @@ struct SiteArgs {
 
     /// Override the built UI assets directory to copy from (default:
     /// `<repo root>/ui/dist`, resolved relative to this crate at compile time —
-    /// see docs/graph-ui-g1-handoff.md WS-B). Mainly useful for testing against a
+    /// see docs/handoffs/graph-ui-g1-handoff.sml WS-B). Mainly useful for testing against a
     /// UI build that lives elsewhere.
     #[arg(long = "ui-dist")]
     ui_dist: Option<PathBuf>,
@@ -209,7 +209,7 @@ struct SiteArgs {
 struct SearchArgs {
     /// Search query: plain-text substring terms plus structural predicates
     /// (`class:<tag>`, `term:<name>`, `alias:<prefix>`), space-separated, all AND'd
-    /// together (D56, sml-spec.md §1.16). CJK text uses ordinary substring matching.
+    /// together (D56, docs/spec-sml/decisions.sml §1.16). CJK text uses ordinary substring matching.
     /// Positional and required, so it must precede the (optional) `file` positional
     /// below — clap requires required positionals before optional ones (裁量: the
     /// spec only fixes the `--workspace` invocation shape; single-file mode is
@@ -254,7 +254,7 @@ fn main() {
     }
 }
 
-/// `strata-cli search` サブコマンド(D56、sml-spec.md §1.16)。内部で
+/// `strata-cli search` サブコマンド(D56、docs/spec-sml/decisions.sml §1.16)。内部で
 /// `strata_build::build`(または `--workspace` なら `build_workspace`)→
 /// `strata_search::InMemoryIndex::from_build`/`from_workspace` → `SearchIndex::search`
 /// (`--switcher` なら `SearchIndex::switcher`)を直結する。exit code は他コマンドと
@@ -377,7 +377,7 @@ fn print_switcher_hits(hits: &[strata_search::SwitcherHit]) {
     }
 }
 
-/// `strata-cli context` サブコマンド(M5-A、D36、docs/context-m5a-handoff.md WP-A2)。
+/// `strata-cli context` サブコマンド(M5-A、D36、docs/handoffs/context-m5a-handoff.sml WP-A2)。
 ///
 /// 内部で `strata_build::build` → `strata_context::render_context` を直結する。
 /// exit code は他コマンドと同じ 0/1/2 の慣習: 2 = SML を読めない・パースできない、
@@ -939,7 +939,7 @@ fn format_workspace_error(e: &strata_build::WorkspaceError, sources: &BTreeMap<S
 }
 
 /// `strata-cli render` サブコマンド(docs/sml-render-m4-handoff.md D-R3、
-/// `--format md` は sml-spec.md §1.8 D38・docs/md-render-handoff.md WP-M3)。
+/// `--format md` は docs/spec-sml/decisions.sml §1.8 D38・docs/handoffs/md-render-handoff.sml WP-M3)。
 ///
 /// 内部で `strata_build::build` → `strata_typst::render_to_typst_with_hide` /
 /// `strata_md::render_to_md_with_hide` のいずれかを直結する(中間 JSON なし)。
@@ -1335,7 +1335,7 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-// --- `strata site`(G1 WS-B、docs/graph-ui-g1-handoff.md、sml-spec.md §1.13 D49/D50) ---
+// --- `strata site`(G1 WS-B、docs/handoffs/graph-ui-g1-handoff.sml、docs/spec-sml/decisions.sml §1.13 D49/D50) ---
 
 /// `strata site` が書き出す graph.json のトップレベル形。単一ファイル/ワークスペース
 /// どちらの build 結果でも同じ形(`graph`/`roots`/`doc_aliases`)に正規化する(裁量:
@@ -1371,7 +1371,7 @@ fn run_site(args: SiteArgs) {
     let ui_dist = args.ui_dist.clone().unwrap_or_else(default_ui_dist);
     if !ui_dist.is_dir() {
         eprintln!(
-            "UI 資産が見つかりません: {}\n`ui/` で `pnpm install && pnpm build` を先に実行してください(docs/graph-ui-g1-handoff.md WS-B)。",
+            "UI 資産が見つかりません: {}\n`ui/` で `pnpm install && pnpm build` を先に実行してください(docs/handoffs/graph-ui-g1-handoff.sml WS-B)。",
             ui_dist.display()
         );
         std::process::exit(2);
