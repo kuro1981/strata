@@ -24,6 +24,37 @@ import type { GraphJson } from "@/types/graph";
  * `overview` はセクション粒度、`outline` は旧来の全展開(オプションに降格)。 */
 export type GraphMode = "local" | "overview" | "outline";
 
+/** image-support-handoff.md item 6: `ImageFigure.src` / `Inline::Image.url`(いずれも
+ * strata-core 側で同じ文字列の意味を共有する、item 3)をブラウザ/webview が読める
+ * `<img src>` へ解決するフック。差し替え可能にすることで ui/ 自体は表示環境
+ * (静的サイト vs strata-editor の Tauri webview)に依存しない(D54)。
+ *
+ * 契約: 入力 `src` は次のいずれか — (1) リモート URL(`http`/`https` で始まる)、
+ * (2) `strata site` が書き出した相対パス(例: `"assets/foo.png"`)、(3) 未加工の
+ * ローカル絶対ファイルシステムパス(`strata build`/`strata view` の生JSONをそのまま
+ * 読ませた場合 — `strata site` を経由していないので item 7 のコピー/相対パス化を
+ * 受けていない)。戻り値は `<img src>` にそのまま渡せる文字列、または空文字列
+ * (呼び出し側はこれを「解決不能・画像を出さない」の合図として扱う — 壊れた
+ * `<img>` タグを出さないため)。
+ *
+ * 呼び出し側は関数のシグネチャ `(src: string) => string` を正確に維持すること
+ * (Phase B で strata-editor が Tauri の `convertFileSrc` 等に差し替える契約)。 */
+export type ResolveImageSrc = (src: string) => string;
+
+/** `resolveImageSrc` の既定実装(static サイト文脈)。
+ * - `http`/`https` の URL はそのまま(リモート画像、常にブラウザから直接読める)。
+ * - 先頭が `/` でない(≒ 相対パス、`strata site` が item 7 で書き出す
+ *   `"assets/foo.png"` 形式)もそのまま — `<img>` の相対 src は現在の HTML の
+ *   場所を基準にブラウザが解決してくれる。
+ * - 先頭が `/` の未加工の絶対ファイルシステムパス(`strata site` を経由していない
+ *   生の graph JSON を直接読ませた場合)はブラウザから読めないため空文字列
+ *   (「画像なしプレースホルダ」を表示させる合図、壊れた `<img>` を出さない)。 */
+export function defaultResolveImageSrc(src: string): string {
+  if (src.startsWith("http")) return src;
+  if (!src.startsWith("/")) return src;
+  return "";
+}
+
 interface GraphContextValue {
   idx: GraphIndex;
   selected: NodeId | null;
@@ -42,6 +73,8 @@ interface GraphContextValue {
   /** D51: ローカルグラフのホップ数(1〜2、トグル)。 */
   localHops: 1 | 2;
   setLocalHops: (hops: 1 | 2) => void;
+  /** image-support-handoff.md item 6。 */
+  resolveImageSrc: ResolveImageSrc;
 }
 
 const GraphContext = createContext<GraphContextValue | null>(null);
@@ -52,7 +85,17 @@ export function useGraph(): GraphContextValue {
   return ctx;
 }
 
-export function GraphProvider({ graph, children }: { graph: GraphJson; children: ReactNode }) {
+export function GraphProvider({
+  graph,
+  children,
+  resolveImageSrc = defaultResolveImageSrc,
+}: {
+  graph: GraphJson;
+  children: ReactNode;
+  /** image-support-handoff.md item 6: 省略時は `defaultResolveImageSrc`(static サイト
+   * 向け)。strata-editor(Phase B)はここへ Tauri 向けの実装を渡して上書きする。 */
+  resolveImageSrc?: ResolveImageSrc;
+}) {
   const idx = useMemo(() => buildIndex(graph), [graph]);
   const [selected, setSelected] = useState<NodeId | null>(null);
   const [activeDoc, setActiveDocState] = useState<string | null>(idx.roots[0]?.path ?? null);
@@ -166,6 +209,7 @@ export function GraphProvider({ graph, children }: { graph: GraphJson; children:
     setGraphMode,
     localHops,
     setLocalHops,
+    resolveImageSrc,
   };
 
   return <GraphContext.Provider value={value}>{children}</GraphContext.Provider>;

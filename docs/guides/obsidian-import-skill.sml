@@ -125,10 +125,59 @@ class: <as: class に該当するキーの値をまとめて列挙>
   記法を含む場合**(例: `author: ["[[Name]]"]`)は `[[` `]]` を剥がして
   プレーンテキスト化する(`Name` のみを書く) — record 値は wikilink 解決の
   対象外のため、`[[ ]]` を残すとそのままテキストとして表示されてしまう {#01KYP2JYCC22N9S6VV89D1685H}
-- **埋め込み `![[target]]` は非対応**(§10 保留)。見つけたら本文はそのまま
-  残しつつ、最終報告のトリアージ一覧に加える(黙って落とさない) {#01KYP2JYCC22N9S6VV89D1685J}
+- **画像の埋め込み `![[file.png]]`(認識拡張子: png/jpg/jpeg/gif/svg/webp、
+  大文字小文字は許容)は対応**(Phase A、`docs/image-support-handoff.md`)。
+  記法はそのまま(`![[file.png]]`/`![[file.png|alt]]`)残せばよく、
+  `strata build` がワークスペースの `assets` グロブと basename 突き合わせで
+  自動解決する。ただし解決には元の添付バイナリを新ワークスペースの
+  `assets/` へ事前にコピーしておく必要がある(下記「添付画像のコピー手順」
+  参照)。それ以外の拡張子の埋め込み(`.pdf` 等)は**引き続き非対応**
+  (§10 保留)。見つけたら本文はそのまま残しつつ、最終報告のトリアージ
+  一覧に加える(黙って落とさない) {#01KYPG9XKM417FQ7S5GFJ52JH9}
 - 通常の Markdown(見出し・リスト・強調・外部リンク等)はそのまま
-  SML ドラフトとして有効(D39 の上位互換性) {#01KYP2JYCC22N9S6VV89D1685K}
+  SML ドラフトとして有効(D39 の上位互換性) {#01KYPG9XKM417FQ7S5GFJ52JHA}
+
+### 添付画像のコピー手順 {#01KYPG9XKM417FQ7S5GFJ52JHB}
+
+[id=01KYPG9XKM417FQ7S5GFJ52JHC]
+対象 `.md` に画像の埋め込み `![[file.png]]`(認識拡張子:
+png/jpg/jpeg/gif/svg/webp)が見つかった場合、`strata build` が解決できる
+よう、以下の手順でバイナリを新ワークスペースへ**非破壊コピー**する
+(D62の非破壊原則、「元の Obsidian vault には一切書き込まない」を踏襲)。
+
+[id=01KYPG9XKM417FQ7S5GFJ52JHD]
+1. 変換対象の全 `.md` から `![[...]]` を抽出し、`|` 前のターゲット名の
+   拡張子で画像/非画像を判別する(非画像は対象外、上記の通りトリアージ)。 {#01KYPG9XKM417FQ7S5GFJ52JHE}
+2. 画像と判定された各ターゲットについて、元 vault 内でそのファイル名
+   (basename)を検索する: `find <vault> -iname "<basename>"`。
+   Obsidian は vault 内でファイル名一意という前提が一般的だが、複数箇所に
+   同名ファイルが存在する可能性は排除しない — 検索結果が複数件の場合は
+   内容を比較し(`cmp`)、同一なら1件を採用、異なれば曖昧なものとして
+   トリアージへ回す(決め打ちで片方を選ばない)。 {#01KYPG9XKM417FQ7S5GFJ52JHF}
+3. 検索で候補が確定したら、新ワークスペースの `assets/` ディレクトリへ
+   コピーする(無ければ作成)。コピー先に既に同名ファイルが存在する場合は
+   `cmp` で内容を比較する: 同一なら何もしない(既にコピー済み、冪等)。
+   **内容が異なる場合はスキップし、最終報告に記録する**(D37確信原則:
+   曖昧なものを AI が決め打ちで上書きしない)。 {#01KYPG9XKM417FQ7S5GFJ52JHG}
+4. 元 vault には一切書き込まない(読み取りのみ)。検索でファイルが
+   1件も見つからない画像参照はスキップし、最終報告に列挙する。 {#01KYPG9XKM417FQ7S5GFJ52JHH}
+5. ワークスペースの `strata.toml` に、`members` と並ぶトップレベルの
+   キーとして `assets = ["assets/**/*"]` を追記する:
+   ```toml
+   [workspace]
+   members = [
+     "inbox/*.sml",
+     ...
+   ]
+   assets = ["assets/**/*"]
+   ```
+   これにより `strata build`/`strata render` 時に `assets/` 配下の画像が
+   basename でインデックスされ、`![[file.png]]` の解決対象になる。 {#01KYPG9XKM417FQ7S5GFJ52JHJ}
+6. `strata build --workspace <strata.toml>` を実行し、`UnresolvedAsset`
+   (basename がどのファイルにも一致しない)・`AmbiguousAsset`(同名複数に
+   一致)が出ないか確認する。出た場合は個別に原因調査し(コピー漏れ・
+   ファイル名の表記揺れ等)、解決できないものはスキップして最終報告に
+   列挙する。 {#01KYPG9XKM417FQ7S5GFJ52JHK}
 
 ### スコープ外ファイル {#01KYP2JYCC22N9S6VV89D1685M}
 

@@ -20,7 +20,10 @@ mod title;
 mod workspace;
 
 pub use error::BuildError;
-pub use workspace::{build_workspace, doc_ownership, DocRoot, FileDiag, Member, WorkspaceBuildOutput, WorkspaceError};
+pub use workspace::{
+    build_workspace, build_workspace_with_assets, doc_ownership, AssetIndex, DocRoot, FileDiag, Member,
+    WorkspaceBuildOutput, WorkspaceError,
+};
 
 use serde::{Deserialize, Serialize};
 use strata_core::{Graph, NodeId};
@@ -59,8 +62,12 @@ pub fn build(src: &str) -> Result<BuildOutput, Vec<BuildError>> {
     // (WP-W1.3、`--workspace` の必要性を案内)。`doc:` 参照(D53)は自文書 alias だけは
     // それでも解決できる(`resolve_doc_ref_target` が `reg.alias_table` を先に見る)。
     // `[[wikilink]]`(D59)も同型: 自文書タイトルとの一致だけは解決できる
-    // (`convert::run` が毎回 `self_title` を算出する)。
-    let (root, pass2_errors) = convert::run(src, &parsed.doc, registry, &mut shared, None, None, None);
+    // (`convert::run` が毎回 `self_title` を算出する)。`![[target]]` 画像embed
+    // (image-support-handoff.md item 2)も同様に asset_index が無いため常に
+    // `AssetNeedsWorkspace` になる(`assets` インデックス自体がワークスペースの
+    // `strata.toml` にしか存在しない)。
+    let (root, pass2_errors) =
+        convert::run(src, &parsed.doc, registry, &mut shared, convert::CrossFileIndexes::default());
     errors.extend(pass2_errors);
 
     if !errors.is_empty() {

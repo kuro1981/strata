@@ -59,6 +59,19 @@ pub enum BuildError {
     /// ワークスペース build で `[[wikilink]]` のタイトルが2つ以上のメンバー文書に
     /// 一致する(D59: 「同名衝突」— 黙って先頭を選ばず曖昧性を報告する)。
     AmbiguousWikilink { title: String, span: Span },
+    /// 単一ファイル build(`--workspace` 無し)で `![[target]]` 画像embed
+    /// (image-support-handoff.md item 2)に遭遇した。`assets` インデックス自体が
+    /// ワークスペース(`strata.toml`)にしか無いため解決不能。`WikilinkNeedsWorkspace`
+    /// と同型 — 黙って落とさずワークスペース対応コマンドの必要性を案内する。
+    AssetNeedsWorkspace { target: String, span: Span },
+    /// ワークスペース build で `![[target]]` の target が `assets` インデックスの
+    /// どの basename にも一致しない(item 2: 「未解決」— wikilink の
+    /// `UnresolvedWikilink` と同型。明示的に埋め込みの意図があるため黙って壊さない)。
+    UnresolvedAsset { target: String, span: Span },
+    /// ワークスペース build で `![[target]]` の target(basename)が `assets`
+    /// インデックス中の2つ以上の実ファイルに一致する(item 2: 「同名衝突」—
+    /// wikilink の `AmbiguousWikilink` と同型。黙って先頭を選ばず曖昧性を報告する)。
+    AmbiguousAsset { target: String, span: Span },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
     /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。

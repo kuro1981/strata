@@ -17,7 +17,7 @@ export function InlineList({ items }: { items: InlineT[] | undefined }) {
 }
 
 export function InlineNode({ node }: { node: InlineT }) {
-  const { select } = useGraph();
+  const { select, resolveImageSrc } = useGraph();
   switch (node.t) {
     case "text":
       return <>{node.s}</>;
@@ -89,9 +89,18 @@ export function InlineNode({ node }: { node: InlineT }) {
           {node.text || node.url}
         </a>
       );
-    case "image":
+    case "image": {
+      // image-support-handoff.md item 6(裁量による適用範囲拡張、最終報告参照):
+      // handoffが明示するのはBlockTree.tsx側のみだが、item 2の「段落内混在の画像embed
+      // は Inline::Image へ降格」実装により、この `node.url` もローカル絶対パスを
+      // 持ちうるようになった。BlockTree.tsx と同じ resolveImageSrc フックを通す。
+      const resolvedSrc = resolveImageSrc(node.url);
+      if (!resolvedSrc) {
+        return <span className="text-xs italic text-muted-foreground">[画像なし{node.alt ? `: ${node.alt}` : ""}]</span>;
+      }
       // eslint-disable-next-line jsx-a11y/alt-text
-      return <img src={node.url} alt={node.alt} loading="lazy" className="my-1 inline-block max-w-full rounded" />;
+      return <img src={resolvedSrc} alt={node.alt} loading="lazy" className="my-1 inline-block max-w-full rounded" />;
+    }
     default:
       return null;
   }

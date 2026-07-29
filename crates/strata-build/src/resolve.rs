@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use strata_sml::{AttrLine, AttrValue, BlockKind, IdTag, RefTarget, SmlDocument, Span};
+use strata_sml::{is_sole_asset_embed, AttrLine, AttrValue, BlockKind, IdTag, RefTarget, SmlDocument, Span};
 use strata_core::NodeId;
 use ulid::Ulid;
 
@@ -121,8 +121,16 @@ fn register_block(
         BlockKind::Heading { id_tag, .. } => {
             register_line_type(block.span, id_tag, NodeKindTag::Section, reg, alias_defs, errors);
         }
-        BlockKind::Paragraph { .. } => {
-            register_prose(block.span, &block.attrs, NodeKindTag::Para, reg, alias_defs, errors);
+        BlockKind::Paragraph { inline } => {
+            // image-support-handoff.md item 2: 段落の inline が画像embed1つだけなら、
+            // convert.rs(Pass2)がこの段落を `Figure::Image` ノードへ昇格させる
+            // (`is_sole_asset_embed`、裁量: 「1行=1embed」という Obsidian の標準的な
+            // 用法のみを対象にする)。ここ(Pass1)でも同じ判定で `NodeKindTag::Figure`
+            // を登録しておかないと、後から `fig:<このブロックの alias>` のような参照が
+            // 実際のノード型(Figure)と食い違う `NodeKindTag::Para` のまま検証されて
+            // しまう(`convert::validate_scheme` の対象ノード型チェックの整合性)。
+            let kind = if is_sole_asset_embed(inline) { NodeKindTag::Figure } else { NodeKindTag::Para };
+            register_prose(block.span, &block.attrs, kind, reg, alias_defs, errors);
         }
         BlockKind::List { items, .. } => {
             register_prose(block.span, &block.attrs, NodeKindTag::List, reg, alias_defs, errors);

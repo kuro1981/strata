@@ -216,6 +216,28 @@ pub enum SmlInline {
     Link { url: Span, text: Span },
     /// インライン画像(`![alt](url)`、M6 D40)。
     Image { url: Span, alt: Span },
+    /// `![[target]]` / `![[target|alt]]`(画像embed、image-support-handoff.md item 2、
+    /// D59 の wikilink と姉妹構文)。target は文書タイトルではなく**アセットファイル名**
+    /// (拡張子込み。パス修飾を書いてもよいが解決は basename 一致 — build の `assets`
+    /// インデックス仕様)。認識拡張子(png/jpg/jpeg/gif/svg/webp、大小文字許容)で
+    /// 終わっている場合にのみこの variant になる — それ以外の `![[...]]`(非画像添付、
+    /// §10 保留)は現状どおり対象外でリテラルへフォールバックする(変更しない)。
+    /// alt は `![[target|alt]]` の明示テキスト。省略時(`![[target]]`)は `None` —
+    /// build が target のbasenameから拡張子を除いたものを既定 alt として使う。
+    /// 解決(`assets` インデックスとの突き合わせ)は build の仕事(wikilink と同型の
+    /// 2段階構成)。
+    AssetEmbed { target: Span, alt: Option<Span> },
+}
+
+/// 段落の inline 列が「画像embed1つだけ」かどうかを判定する(image-support-handoff.md
+/// item 2: Obsidian の `![[foo.png]]` は通常その行単独で書かれる標準的な用法。
+/// build はこの形のときだけ、段落ノードを丸ごと `Figure::Image` ノードへ昇格させる
+/// — 他のテキストと混在する画像embedは通常のインライン画像として扱う、v0 の裁量)。
+/// 前後の空白文字だけを含む `Text` の同居までは許容しない(単純な長さ1判定。
+/// 空白付き埋め込み行は昇格対象外という裁量、最終報告参照)。build(resolve.rs の
+/// Pass1・convert.rs の Pass2)の両方がこの1判定を共有する。
+pub fn is_sole_asset_embed(inline: &[SmlInline]) -> bool {
+    matches!(inline, [SmlInline::AssetEmbed { .. }])
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

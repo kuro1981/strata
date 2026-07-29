@@ -30,6 +30,14 @@ pub struct Member {
     pub src: String,
 }
 
+/// アセットインデックス(image-support-handoff.md item 1): basename(拡張子込み)→
+/// 絶対パス群。`strata.toml` の `assets` グロブをスキャンして strata-cli が組み立て、
+/// build には読み取り専用の完成品として渡す(`build_workspace` 自体はファイル
+/// システムに触れない、というこのモジュール既存の方針を踏襲)。値が `Vec` なのは
+/// 「同名ファイルが複数箇所にマッチ」を検出するため(2件以上あれば
+/// `AmbiguousAsset`、wikilink の `title_index` と同型)。
+pub type AssetIndex = HashMap<String, Vec<String>>;
+
 /// 1メンバー文書のルート情報(WP-W2.4: 複数文書ぶんの roots の表現、裁量)。
 /// `alias` はフロントマターに alias が無ければ `None`(D41: エラーではない —
 /// その文書へは ULID 参照のみ可)。`root` はフロントマター自体が無ければ `None`
@@ -86,9 +94,25 @@ pub enum WorkspaceError {
 /// 公開 API: 複数の SML ソースから単一の統合 canonical グラフを構築する
 /// (WP-W2.2、sml-spec.md §1.10 D43)。
 ///
+/// `assets` インデックス(image-support-handoff.md item 1)を持たない後方互換版
+/// (既存呼び出し元・テストを変更せずに済むよう `build_workspace_with_assets` を
+/// 空インデックスで呼ぶだけの薄いラッパーにした、裁量)。`![[target]]` 画像embed に
+/// 遭遇すれば(ワークスペース build なので)常に `UnresolvedAsset` になる
+/// (`AssetNeedsWorkspace` にはならない — アセットインデックス自体は空でも「有る」
+/// ため)。
+pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<WorkspaceError>> {
+    build_workspace_with_assets(members, &AssetIndex::new())
+}
+
+/// 公開 API: `assets` インデックス(image-support-handoff.md item 1)込みのワークスペース
+/// build。strata-cli の実際の呼び出し経路はこちらを使う。
+///
 /// 全か無か(D13 と同じ方針をワークスペース全体に拡張): 全ファイルを最後まで処理し、
 /// 収集した全 `WorkspaceError` を返す(最初の1件で止めない)。
-pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<WorkspaceError>> {
+pub fn build_workspace_with_assets(
+    members: &[Member],
+    assets: &AssetIndex,
+) -> Result<WorkspaceBuildOutput, Vec<WorkspaceError>> {
     let mut errors: Vec<WorkspaceError> = Vec::new();
     let mut warnings: Vec<FileDiag> = Vec::new();
 
@@ -214,9 +238,12 @@ pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<W
             &f.doc,
             f.registry,
             &mut shared,
-            Some(&cross_doc),
-            Some(&doc_index),
-            Some(&title_index),
+            convert::CrossFileIndexes {
+                cross_doc: Some(&cross_doc),
+                doc_index: Some(&doc_index),
+                title_index: Some(&title_index),
+                asset_index: Some(assets),
+            },
         );
         for e in pass2_errors {
             errors.push(WorkspaceError::Member { path: path.clone(), error: e });

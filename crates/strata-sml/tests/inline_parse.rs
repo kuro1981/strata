@@ -78,6 +78,12 @@ fn assert_spans_within(nodes: &[SmlInline], span: Span) {
                 assert!(url.start >= span.start && url.end <= span.end, "url span escapes bounds");
                 assert!(text.start >= span.start && text.end <= span.end, "text span escapes bounds");
             }
+            SmlInline::AssetEmbed { target, alt } => {
+                assert!(target.start >= span.start && target.end <= span.end, "target span escapes bounds");
+                if let Some(alt) = alt {
+                    assert!(alt.start >= span.start && alt.end <= span.end, "alt span escapes bounds");
+                }
+            }
         }
     }
 }

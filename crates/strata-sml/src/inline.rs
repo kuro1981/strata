@@ -21,8 +21,13 @@
 //!   - `[[target]]` / `[[target|表示テキスト]]`(Obsidian wikilink、D59、sml-spec
 //!     §1.18)→ `SmlInline::Ref { scheme: RefScheme::Wikilink, .. }`。target はタイトル
 //!     文字列(字句制限なし)。`|` 前後の空白は許容。埋め込み `![[target]]` は対象外
-//!     (§10 保留、`!` 直前があれば wikilink として扱わず素通し)。解決(タイトル一致)は
+//!     (`!` 直前があれば wikilink として扱わず素通し)。解決(タイトル一致)は
 //!     build の仕事
+//!   - `![[target]]` / `![[target|alt]]`(画像embed、image-support-handoff.md item 2、
+//!     Phase A 新設)→ target(`|` 前)が認識拡張子(png/jpg/jpeg/gif/svg/webp)で
+//!     終わっていれば `SmlInline::AssetEmbed { target, alt }`。それ以外の
+//!     `![[...]]`(非画像添付)は依然§10保留のスコープ外でリテラルへフォールバックする
+//!     (変更なし)。解決(`assets` インデックスとの突き合わせ)は build の仕事
 //!
 //! スキーム別の target 字句規則:
 //!   - `ref` / `table` / `fig` / `math` / `cell` の target: ULID(26字 Crockford)なら
@@ -165,8 +170,17 @@ fn parse_span(src: &str, span: Span, diags: &mut Vec<Diag>, refdefs: &RefDefs) -
                     i += 1;
                 }
             }
+            // image-support-handoff.md item 2: `![[target]]` / `![[target|alt]]`
+            // (画像embed)を、既存の `![alt](url)` より先に試す。`![[` の形(2つ目の
+            // `[` まで確認)でなければ従来どおり `try_parse_image` のみを試す
+            // (単一 `[` の `![alt](url)` はここで一切影響を受けない)。
             b'!' if i + 1 < end && bytes[i + 1] == b'[' => {
-                if let Some((node, next_i)) = try_parse_image(src, i, end, diags) {
+                let parsed = if i + 2 < end && bytes[i + 2] == b'[' {
+                    try_parse_asset_embed(src, i, end).or_else(|| try_parse_image(src, i, end, diags))
+                } else {
+                    try_parse_image(src, i, end, diags)
+                };
+                if let Some((node, next_i)) = parsed {
                     flush_text(&mut out, text_start, i);
                     out.push(node);
                     i = next_i;
@@ -413,6 +427,62 @@ fn try_parse_wikilink(src: &str, open: usize, limit: usize) -> Option<(SmlInline
         let target = RefTarget::Label(target_span.slice(src).to_string());
         Some((SmlInline::Ref { scheme: RefScheme::Wikilink, target, coord: None, text: target_span }, next_i))
     }
+}
+
+/// 画像embedとして認識する拡張子(image-support-handoff.md item 1、大小文字許容)。
+/// `pub` にしてあるのは strata-cli の `strata.toml` `assets` グロブスキャン
+/// (item 1)が同じ判定基準を共有するため — 2箇所に同じリストを独立定義すると
+/// ドリフトしうるので、ここを正本にする。
+pub const IMAGE_ASSET_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "svg", "webp"];
+
+/// `name` が `IMAGE_ASSET_EXTS` のいずれかの拡張子で終わっているか(大小文字を
+/// 区別しない)。
+fn has_recognized_image_ext(name: &str) -> bool {
+    match name.rsplit_once('.') {
+        Some((_, ext)) => IMAGE_ASSET_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => false,
+    }
+}
+
+/// `![[target]]` / `![[target|alt]]`(画像embed、image-support-handoff.md item 2)を
+/// `bang`(`!` の位置)から試しにパースする。呼び出し側は `bytes[bang+1]` と
+/// `bytes[bang+2]` が両方 `[` であることを確認済み。
+///
+/// - `|` の前後の空白は許容(trim する、D59 の wikilink と同じ寛容さ)
+/// - 閉じ `]]` が無い、または target/alt が(trim 後に)空の場合は `None`
+///   (呼び出し側が `try_parse_image` を試し、それも失敗すればリテラルへ
+///   フォールバックする)
+/// - target(`|` 前の部分)が認識拡張子(`IMAGE_ASSET_EXTS`)で終わっていなければ
+///   `None`(非画像添付は対象外、§10 保留のまま変更しない)
+fn try_parse_asset_embed(src: &str, bang: usize, limit: usize) -> Option<(SmlInline, usize)> {
+    let bytes = src.as_bytes();
+    let open = bang + 1; // 最初の '['
+    let content_start = open + 2; // 2つ目の '[' の次
+    let close = find_double(bytes, content_start, limit, b']', b']')?;
+    let next_i = close + 2;
+    let content = Span::new(content_start, close);
+
+    let (target_span, alt_span) = if let Some(pipe_rel) = content.slice(src).find('|') {
+        let pipe_abs = content_start + pipe_rel;
+        let target_span = trim_span(src, Span::new(content_start, pipe_abs));
+        let alt_span = trim_span(src, Span::new(pipe_abs + 1, close));
+        if target_span.is_empty() || alt_span.is_empty() {
+            return None;
+        }
+        (target_span, Some(alt_span))
+    } else {
+        let target_span = trim_span(src, content);
+        if target_span.is_empty() {
+            return None;
+        }
+        (target_span, None)
+    };
+
+    if !has_recognized_image_ext(target_span.slice(src)) {
+        return None;
+    }
+
+    Some((SmlInline::AssetEmbed { target: target_span, alt: alt_span }, next_i))
 }
 
 /// `[text](scheme:target...)` を `i`(`[` の位置)から試しにパースする。
@@ -992,6 +1062,71 @@ mod tests {
         let (out, diags) = parse(src);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    // ---- image-support-handoff.md item 2: `![[target]]` 画像embed --------------------
+
+    #[test]
+    fn bare_image_embed_parses_as_asset_embed_with_no_alt() {
+        let src = "![[foo.png]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            SmlInline::AssetEmbed { target, alt } => {
+                assert_eq!(target.slice(src), "foo.png");
+                assert!(alt.is_none());
+            }
+            other => panic!("expected asset embed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piped_image_embed_uses_explicit_alt() {
+        let src = "![[foo.png|説明]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &out[0] {
+            SmlInline::AssetEmbed { target, alt } => {
+                assert_eq!(target.slice(src), "foo.png");
+                assert_eq!(alt.expect("alt span").slice(src), "説明");
+            }
+            other => panic!("expected asset embed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_embed_extension_check_is_case_insensitive() {
+        let src = "![[foo.PNG]]";
+        let (out, _) = parse(src);
+        assert!(matches!(&out[0], SmlInline::AssetEmbed { .. }));
+    }
+
+    /// 認識拡張子(png/jpg/jpeg/gif/svg/webp)で終わらない `![[...]]` は非画像添付
+    /// (§10 保留)のまま — 従来どおりリテラルへフォールバックする(変更しない)。
+    #[test]
+    fn non_image_embed_extension_stays_literal() {
+        let src = "![[note.md]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    #[test]
+    fn unclosed_image_embed_falls_back_to_literal() {
+        let src = "![[foo.png";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    #[test]
+    fn image_embed_followed_by_more_text() {
+        let src = "見出し![[foo.png]]の後";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 3);
+        assert!(matches!(&out[1], SmlInline::AssetEmbed { .. }));
     }
 
     /// D40 のバックスラッシュエスケープとの相互作用: 最初の `[` がエスケープされていれば

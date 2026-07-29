@@ -64,6 +64,8 @@ pub enum NInline {
     Escaped(String),
     Link { url: String, text: String },
     Image { url: String, alt: String },
+    /// image-support-handoff.md item 2(Phase A 新設)。
+    AssetEmbed { target: String, alt: Option<String> },
 }
 
 pub fn norm_inline(src: &str, node: &SmlInline) -> NInline {
@@ -80,6 +82,9 @@ pub fn norm_inline(src: &str, node: &SmlInline) -> NInline {
         SmlInline::Escaped(sp) => NInline::Escaped(sp.slice(src).to_string()),
         SmlInline::Link { url, text } => NInline::Link { url: url.slice(src).to_string(), text: text.slice(src).to_string() },
         SmlInline::Image { url, alt } => NInline::Image { url: url.slice(src).to_string(), alt: alt.slice(src).to_string() },
+        SmlInline::AssetEmbed { target, alt } => {
+            NInline::AssetEmbed { target: target.slice(src).to_string(), alt: alt.map(|a| a.slice(src).to_string()) }
+        }
     }
 }
 

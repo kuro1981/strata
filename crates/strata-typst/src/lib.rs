@@ -36,6 +36,10 @@ pub struct RenderOutput {
 /// `--hide` を使わない既定経路(D23 以前と後方互換)。内部は
 /// `render_to_typst_with_hide` に `hide: &[]` で委譲するだけなので、warnings は
 /// 常に空になる(非表示クラスが無ければ隠れる Ref も存在しない)。
+/// image-support-handoff.md item 4: `Figure::Image` を実描画する場合、埋め込む画像
+/// パスは OS 絶対パスのため、`typst compile` 側で `--root /`(または対象パスを覆う
+/// `--root`)を指定する必要がある(`render_image` のドキュメント参照 — 既定 root
+/// (`.typ` の親ディレクトリ)のままだと `file not found` になる、実地検証で確定)。
 pub fn render_to_typst(graph: &Graph, root: NodeId, fallback_title: &str) -> Result<String, String> {
     render_to_typst_with_hide(graph, root, fallback_title, &[]).map(|out| out.text)
 }
@@ -891,30 +895,151 @@ impl<'a> TypstRenderer<'a> {
         Ok(format!("#figure(\n{}{}\n) <{}>\n\n", body, caption_part, label(node_id)))
     }
 
+    /// image-support-handoff.md item 4: プレースホルダ描画を実際の `#image()` 埋め込み
+    /// へ置き換える。`resolve_image_path` が実描画可能なローカルパスを返せなければ
+    /// (ローカルファイル欠落・リモートダウンロード失敗のいずれも)、従来の
+    /// プレースホルダ枠(alt/src テキスト表示)へ warning 付きでフォールバックする —
+    /// render は例外的失敗で全体を止めない、という既存方針(`HtmlNotSupported` 等)を
+    /// 画像描画にも適用する。
+    ///
+    /// **運用上の既知の制約(`typst compile` 実地検証で確定、handoff item 4 の
+    /// 「要実地検証」を受けての発見 — 裁量、最終報告で強調):** ここで埋め込む
+    /// パスは OS の絶対パス(例: `/home/user/vault/assets/foo.png`)だが、Typst の
+    /// `image()` はこれを「OS絶対パス」としては解釈しない —
+    /// 先頭 `/` は Typst のプロジェクトroot相対パスとして扱われる(`..` による
+    /// root超えも既定で拒否される)。そのため `typst compile` する際は
+    /// **`--root /`(または埋め込んだ全パスを覆う `--root`)を明示的に指定する必要が
+    /// ある**(既定の root = `.typ` ファイルの親ディレクトリのままでは
+    /// `file not found` になる)。v0はポータブル性より実装の単純さを優先する割り切り
+    /// (image-support-handoff.md item 3 の裁定どおり)— 出力 `.typ` の位置を基準に
+    /// した相対パス化・画像の同梱コピーは §10 保留の将来課題とする。
     fn render_image(&mut self, img: &ImageFigure, node_id: NodeId) -> Result<String, String> {
-        let alt = typst_escape(&img.alt);
-        let src = typst_escape(&img.src);
         let desc = img.depicts.get("description").map(|s| typst_escape(s));
-
-        let mut body = String::new();
-        body.push_str("  box(width: 100%, height: 4cm, stroke: 0.5pt + luma(150))[\n");
-        body.push_str("    #align(center + horizon)[\n");
-        body.push_str("      画像(プレースホルダ) #linebreak()\n");
-        body.push_str(&format!("      alt: {} #linebreak()\n", alt));
-        if let Some(desc) = desc {
-            body.push_str(&format!("      {} #linebreak()\n", desc));
-        }
-        body.push_str(&format!("      src: {}\n", src));
-        body.push_str("    ]\n");
-        body.push_str("  ]");
-
         let caption_part = match &img.caption {
             Some(inlines) => format!(",\n  caption: [{}]", self.render_inlines(inlines)?),
             None => String::new(),
         };
 
+        let body = match self.resolve_image_path(&img.src, node_id) {
+            Some(path) => {
+                // Typst `image()` は 0.13 以降 `alt:` パラメータを受け付ける(alt
+                // テキストをプレースホルダから引き継ぐ、handoff item 4 の要件)。
+                format!(
+                    "  image(\"{}\", alt: \"{}\")",
+                    typst_string_escape(&path),
+                    typst_string_escape(&img.alt)
+                )
+            }
+            None => {
+                let alt = typst_escape(&img.alt);
+                let src = typst_escape(&img.src);
+                let mut body = String::new();
+                body.push_str("  box(width: 100%, height: 4cm, stroke: 0.5pt + luma(150))[\n");
+                body.push_str("    #align(center + horizon)[\n");
+                body.push_str("      画像(プレースホルダ) #linebreak()\n");
+                body.push_str(&format!("      alt: {} #linebreak()\n", alt));
+                if let Some(desc) = &desc {
+                    body.push_str(&format!("      {} #linebreak()\n", desc));
+                }
+                body.push_str(&format!("      src: {}\n", src));
+                body.push_str("    ]\n");
+                body.push_str("  ]");
+                body
+            }
+        };
+
         Ok(format!("#figure(\n{}{}\n) <{}>\n\n", body, caption_part, label(node_id)))
     }
+
+    /// `img.src` を Typst `#image()` に渡せるローカルファイルパスへ解決する
+    /// (image-support-handoff.md item 3/4)。`starts_with("http")` でリモート/
+    /// ローカルを判別する(item 3 で確定した `ImageFigure.src` の意味)。
+    /// - ローカル絶対パス: 実在すればそのまま返す。実在しなければ
+    ///   `MissingLocalImage` warning を積んで `None`(壊れた `#image()` 呼び出しで
+    ///   `typst compile` 全体を失敗させない、item 4 のフォールバック方針をローカル
+    ///   欠落にも適用する裁量)。
+    /// - リモート URL: `download_remote_image` へ委譲。
+    fn resolve_image_path(&mut self, src: &str, node_id: NodeId) -> Option<String> {
+        if src.starts_with("http") {
+            return self.download_remote_image(src, node_id);
+        }
+        if src.is_empty() {
+            // build がエラー(UnresolvedAsset 等)を積んだダミー値。この render 呼び出し
+            // 自体には現れない経路のはずだが(build が全か無かで先に Err を返す)、
+            // 単体テスト等で直接 ImageFigure を組み立てるケースへの防御。
+            return None;
+        }
+        if std::path::Path::new(src).is_file() {
+            return Some(src.to_string());
+        }
+        self.warnings.push(format!(
+            "-:-: warning: MissingLocalImage: 画像ファイルが見つかりません: {} — プレースホルダで代替します。",
+            src
+        ));
+        None
+    }
+
+    /// リモート URL 画像を一時ディレクトリへ同期ダウンロードする(`ureq`、item 4)。
+    /// ネットワーク不通・非2xx応答・読み込み失敗・書き込み失敗のいずれでも
+    /// `ImageDownloadFailed` warning を積んで `None` を返す(render 全体は止めない)。
+    /// ファイル名は対象ノードの ULID(`label(node_id)`)を含めるため、同一 render 内で
+    /// 衝突しない。
+    fn download_remote_image(&mut self, url: &str, node_id: NodeId) -> Option<String> {
+        let resp = match ureq::get(url).timeout(std::time::Duration::from_secs(15)).call() {
+            Ok(r) => r,
+            Err(e) => {
+                self.warnings.push(format!(
+                    "-:-: warning: ImageDownloadFailed: 画像のダウンロードに失敗しました({}): {} — プレースホルダで代替します。",
+                    url, e
+                ));
+                return None;
+            }
+        };
+        let ext = guess_image_ext(url, resp.header("Content-Type"));
+        let mut bytes: Vec<u8> = Vec::new();
+        if let Err(e) = std::io::Read::read_to_end(&mut resp.into_reader(), &mut bytes) {
+            self.warnings.push(format!(
+                "-:-: warning: ImageDownloadFailed: 画像データの読み込みに失敗しました({}): {} — プレースホルダで代替します。",
+                url, e
+            ));
+            return None;
+        }
+        let path = std::env::temp_dir().join(format!("strata-typst-img-{}.{}", label(node_id), ext));
+        if let Err(e) = std::fs::write(&path, &bytes) {
+            self.warnings.push(format!(
+                "-:-: warning: ImageDownloadFailed: 一時ファイルへの書き込みに失敗しました({}): {} — プレースホルダで代替します。",
+                url, e
+            ));
+            return None;
+        }
+        Some(path.to_string_lossy().into_owned())
+    }
+}
+
+/// リモート画像の一時ファイル拡張子を、URL パスの拡張子(優先)または
+/// `Content-Type` レスポンスヘッダから推定する(item 4)。どちらからも判別できなければ
+/// `png` にフォールバックする(Typst の `image()` は拡張子から形式を推定するため、
+/// 何らかの拡張子が要る。実データと食い違えば `typst compile` 側のデコードエラーに
+/// なりうるが、404/タイムアウト等と違い build 側では検出できない v0 の既知の制限
+/// — 裁量、最終報告参照)。
+fn guess_image_ext(url: &str, content_type: Option<&str>) -> String {
+    const EXTS: [&str; 6] = ["png", "jpg", "jpeg", "gif", "svg", "webp"];
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    if let Some((_, ext)) = path.rsplit_once('.') {
+        let lower = ext.to_ascii_lowercase();
+        if EXTS.contains(&lower.as_str()) {
+            return lower;
+        }
+    }
+    match content_type.map(|c| c.split(';').next().unwrap_or(c).trim()) {
+        Some("image/png") => "png",
+        Some("image/jpeg") => "jpg",
+        Some("image/gif") => "gif",
+        Some("image/svg+xml") => "svg",
+        Some("image/webp") => "webp",
+        _ => "png",
+    }
+    .to_string()
 }
 
 /// ブロックノードの Typst ラベル文字列(D22: `<ULID>`)。ULID をそのままラベル名に

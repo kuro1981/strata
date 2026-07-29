@@ -22,6 +22,7 @@ use ulid::Ulid;
 
 use crate::error::BuildError;
 use crate::resolve::{CrossDocIndex, NodeKindTag, Registration, Registry};
+use crate::workspace::AssetIndex;
 use crate::{list_child, math, term};
 
 struct Builder<'a> {
@@ -50,6 +51,10 @@ struct Builder<'a> {
     /// 単一ファイル build でも自己参照(`[[自分のタイトル]]`)を解決するために使う
     /// (`doc:` スキームが `reg.alias_table` で自文書 alias を先に見るのと同型)。
     self_title: Option<String>,
+    /// image-support-handoff.md item 1/2: `![[target]]` 画像embedのワークスペース
+    /// 全体解決 index(basename → 絶対パス群、2件以上あれば `AmbiguousAsset`)。
+    /// `title_index` と同型: 単一ファイル build では `None`(常に `AssetNeedsWorkspace`)。
+    asset_index: Option<&'a AssetIndex>,
 }
 
 /// Pass 2 が複数ファイルにまたがって共有する可変状態(WP-W2: ワークスペース統合)。
@@ -69,14 +74,24 @@ impl SharedState {
     }
 }
 
+/// ワークスペース全体解決 index 一式(clippy::too_many_arguments 回避のため
+/// `run` の引数をまとめた、裁量)。単一ファイル build は全フィールド `None` の
+/// `Default` を渡す(`cross_doc`/`doc_index`/`title_index`/`asset_index` それぞれの
+/// フィールドコメントは元の `Builder` 側に集約してある)。
+#[derive(Default, Clone, Copy)]
+pub(crate) struct CrossFileIndexes<'a> {
+    pub cross_doc: Option<&'a CrossDocIndex>,
+    pub doc_index: Option<&'a HashMap<String, NodeId>>,
+    pub title_index: Option<&'a HashMap<String, Vec<NodeId>>>,
+    pub asset_index: Option<&'a AssetIndex>,
+}
+
 pub(crate) fn run(
     src: &str,
     doc: &SmlDocument,
     reg: Registry,
     shared: &mut SharedState,
-    cross_doc: Option<&CrossDocIndex>,
-    doc_index: Option<&HashMap<String, NodeId>>,
-    title_index: Option<&HashMap<String, Vec<NodeId>>>,
+    idx: CrossFileIndexes<'_>,
 ) -> (Option<NodeId>, Vec<BuildError>) {
     let self_title = crate::title::document_title(src, doc).map(|t| crate::title::normalize_title(&t));
     let mut b = Builder {
@@ -87,10 +102,11 @@ pub(crate) fn run(
         errors: Vec::new(),
         ord: &mut shared.ord,
         hr_count: 0,
-        cross_doc,
-        doc_index,
-        title_index,
+        cross_doc: idx.cross_doc,
+        doc_index: idx.doc_index,
+        title_index: idx.title_index,
         self_title,
+        asset_index: idx.asset_index,
     };
 
     let root = b.reg.document_id;
@@ -178,8 +194,19 @@ impl<'a> Builder<'a> {
                 stack.push((*level, id));
             }
             BlockKind::Paragraph { inline } => {
-                let inline = self.convert_inlines(id, inline);
-                self.graph.insert(Node::new(id, NodePayload::Para(Para { inline, checked: None })));
+                // image-support-handoff.md item 2: 段落が画像embed1つだけなら、段落
+                // ノードそのものを `Figure::Image` へ昇格させる(Obsidian の標準的な
+                // 「1行=1embed」用法。resolve.rs の Pass1 も同じ判定で
+                // `NodeKindTag::Figure` を登録済み — 整合性は `is_sole_asset_embed` の
+                // 単一判定を共有することで保つ)。それ以外(他のテキストと混在)は
+                // 従来どおり Para ノードのまま、`convert_inline` 側のフォールバック経路
+                // (通常のインライン画像として扱う)に任せる。
+                if let [SmlInline::AssetEmbed { target, alt }] = inline.as_slice() {
+                    self.build_asset_embed_figure(id, *target, *alt);
+                } else {
+                    let inline = self.convert_inlines(id, inline);
+                    self.graph.insert(Node::new(id, NodePayload::Para(Para { inline, checked: None })));
+                }
                 if let Some(p) = current_parent(stack, root) {
                     self.add_contains(p, id);
                 }
@@ -501,6 +528,58 @@ impl<'a> Builder<'a> {
         NodeId::new()
     }
 
+    /// `![[target]]` / `![[target|alt]]` の解決(image-support-handoff.md item 2)。
+    /// `asset_index`(basename → 絶対パス群)と突き合わせる — `resolve_wikilink_target`
+    /// のタイトル解決と同型の2段階構成:
+    /// - `asset_index: None`(単一ファイル build)→ `AssetNeedsWorkspace`
+    /// - basename がどのファイルにも一致しない → `UnresolvedAsset`
+    /// - 2件以上のファイルに一致(同名衝突)→ `AmbiguousAsset`
+    ///
+    /// 戻り値は `(src, alt)`。エラー時の `src` は空文字列のダミー値 — 呼び出し側は
+    /// それでも `ImageFigure`/`Inline::Image` を組み立てるが、エラーが1件でもあれば
+    /// 「全か無か」(D13)により最終的にグラフごと破棄されるため実害はない
+    /// (既存の `UnresolvedAlias` 等と同じ「診断は積むがノードは作る」方針)。診断位置は
+    /// `target` span を使う(`resolve_wikilink_target` が display span=`text` を使うのと
+    /// 同じ裁量: embed全体ではなくファイル名部分を指す方が誤りの箇所を特定しやすい)。
+    fn resolve_asset(&mut self, target: Span, alt: Option<Span>) -> (String, String) {
+        let raw_target = target.slice(self.src).to_string();
+        let alt_text = match alt {
+            Some(a) => a.slice(self.src).to_string(),
+            None => default_asset_alt(&raw_target),
+        };
+        // target はパス修飾込みでも良いが、解決は basename 一致(item 1)。
+        let basename = raw_target.rsplit('/').next().unwrap_or(&raw_target);
+
+        let Some(index) = self.asset_index else {
+            self.errors.push(BuildError::AssetNeedsWorkspace { target: raw_target, span: target });
+            return (String::new(), alt_text);
+        };
+        match index.get(basename) {
+            Some(paths) if paths.len() == 1 => (paths[0].clone(), alt_text),
+            Some(paths) if paths.len() > 1 => {
+                self.errors.push(BuildError::AmbiguousAsset { target: raw_target, span: target });
+                (String::new(), alt_text)
+            }
+            _ => {
+                self.errors.push(BuildError::UnresolvedAsset { target: raw_target, span: target });
+                (String::new(), alt_text)
+            }
+        }
+    }
+
+    /// 段落丸ごとが画像embed1つだけのとき(`build_block` の `Paragraph` 分岐)、その
+    /// 段落の NodeId をそのまま再利用して `Figure::Image` ノードを構築する
+    /// (image-support-handoff.md item 2)。新規 NodeId を発行しない — この段落は
+    /// resolve.rs の Pass1 で既に `NodeKindTag::Figure` として登録済みなので、
+    /// 同じ id をそのまま Figure として insert すれば整合する。
+    fn build_asset_embed_figure(&mut self, id: NodeId, target: Span, alt: Option<Span>) {
+        let (src, alt) = self.resolve_asset(target, alt);
+        self.graph.insert(Node::new(
+            id,
+            NodePayload::Figure(Figure::Image(ImageFigure { src, alt, depicts: BTreeMap::new(), caption: None })),
+        ));
+    }
+
     /// doc 修飾参照(`<文書alias>/<ブロックalias>`)の共通解決ロジック。
     /// - `cross_doc: None`(単一ファイル build、`--workspace` 無し)→ `CrossDocRef`
     ///   (黙って落とさず `--workspace` の必要性を案内する、WP-W1.3)
@@ -568,6 +647,17 @@ impl<'a> Builder<'a> {
                 url: url.slice(self.src).to_string(),
                 alt: alt.slice(self.src).to_string(),
             },
+            // image-support-handoff.md item 2: 画像embedが段落丸ごと(`build_block` の
+            // `Paragraph` 分岐で `[AssetEmbed]` 単独として検出済み)でない場合 —
+            // 他のテキストと混在している、またはリスト項目/引用の中にある場合 — は
+            // `Figure::Image` ノードへ昇格させず、通常のインライン画像
+            // (`Inline::Image`、`![alt](url)` と同じ表現)として埋め込む(裁量:
+            // 「1行=1embed」以外の用法まで独立ノード化する複雑さを避けた、最終報告参照)。
+            // `url` はワークスペース解決済みの絶対パス(またはエラー時は空文字列)。
+            SmlInline::AssetEmbed { target, alt } => {
+                let (src, alt) = self.resolve_asset(*target, *alt);
+                Inline::Image { url: src, alt }
+            }
             SmlInline::Emph { kind, children } => {
                 Inline::Emph { kind: convert_emph_kind(*kind), children: self.convert_inlines(from, children) }
             }
@@ -801,6 +891,16 @@ fn fold_depicts(entries: &[&(String, AttrValue, Span)]) -> BTreeMap<String, Stri
         }
     }
     depicts
+}
+
+/// `![[target]]`(alt省略)の既定alt(image-support-handoff.md item 2):
+/// target のbasenameから拡張子を除いたもの。例: `"assets/foo.png"` → `"foo"`。
+fn default_asset_alt(raw_target: &str) -> String {
+    let basename = raw_target.rsplit('/').next().unwrap_or(raw_target);
+    match basename.rsplit_once('.') {
+        Some((stem, _ext)) if !stem.is_empty() => stem.to_string(),
+        _ => basename.to_string(),
+    }
 }
 
 /// `DateRaw`(strata-sml、層1)→ `DateValue`(strata-core、canonical)の直写し変換(D29)。

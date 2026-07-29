@@ -29,13 +29,18 @@ export function DocumentPane() {
         </div>
       )}
       {roots.length > 1 && (
-        <div className="flex shrink-0 flex-wrap gap-1 border-b border-border bg-background px-2 py-1.5">
+        // 文書数が多いワークスペース(ワークスペース統合・vault 移行で数百文書規模に
+        // なりうる)でもタブバーが本文エリアの高さを食い潰さないよう、折り返さず
+        // 横スクロールの1行に固定する(元は flex-wrap で数個の文書を想定した設計 —
+        // 実データで発覚: 198文書で数十行に折り返し、本文(flex-1)が高さ0に潰れて
+        // 何も表示されなくなる実害があった)。
+        <div className="flex shrink-0 flex-nowrap gap-1 overflow-x-auto border-b border-border bg-background px-2 py-1.5">
           {roots.map((r) => (
             <button
               key={r.path}
               onClick={() => setActiveDoc(r.path)}
               className={cn(
-                "rounded-md px-2 py-1 text-xs font-medium transition-colors",
+                "shrink-0 rounded-md px-2 py-1 text-xs font-medium transition-colors",
                 r.path === active.path ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-muted",
               )}
               title={r.path}

@@ -307,7 +307,7 @@ function TableContent({ node }: { node: Extract<StrataNode, { type: "table" }> }
 }
 
 function FigureContent({ node }: { node: Extract<StrataNode, { type: "figure" }> }) {
-  const { idx } = useGraph();
+  const { idx, resolveImageSrc } = useGraph();
   if (node.kind === "chart") {
     const dataNode = idx.nodes.get(node.data_ref);
     return (
@@ -333,10 +333,20 @@ function FigureContent({ node }: { node: Extract<StrataNode, { type: "figure" }>
       </div>
     );
   }
+  // image-support-handoff.md item 6: resolveImageSrc が空文字列を返したら
+  // (静的サイト既定実装では「未加工の絶対ローカルパスで解決不能」の合図)、壊れた
+  // `<img>` タグではなくプレースホルダを出す。
+  const resolvedSrc = resolveImageSrc(node.src);
   return (
     <figure className="rounded border border-border bg-muted/30 px-3 py-2 text-sm">
-      {/* eslint-disable-next-line jsx-a11y/alt-text */}
-      <img src={node.src} alt={node.alt} loading="lazy" className="max-w-full rounded" />
+      {resolvedSrc ? (
+        // eslint-disable-next-line jsx-a11y/alt-text
+        <img src={resolvedSrc} alt={node.alt} loading="lazy" className="max-w-full rounded" />
+      ) : (
+        <div className="flex h-24 items-center justify-center rounded border border-dashed border-border text-xs text-muted-foreground">
+          画像なし{node.alt ? `: ${node.alt}` : ""}
+        </div>
+      )}
       {node.caption && (
         <figcaption className="mt-1 text-xs italic">
           <InlineList items={node.caption} />

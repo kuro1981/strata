@@ -69,7 +69,9 @@ fn push_plain_text(src: &str, inlines: &[SmlInline], out: &mut String) {
             SmlInline::Ref { text, .. } | SmlInline::TermRef { text, .. } | SmlInline::Link { text, .. } => {
                 out.push_str(text.slice(src));
             }
-            SmlInline::Image { .. } | SmlInline::MathTex(_) => {}
+            // image-support-handoff.md item 2: 画像embedも見出しテキストには寄与しない
+            // (Image と同型)。
+            SmlInline::Image { .. } | SmlInline::AssetEmbed { .. } | SmlInline::MathTex(_) => {}
         }
     }
 }

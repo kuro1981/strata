@@ -102,6 +102,13 @@ struct RenderArgs {
 
     /// Output format: `typst` (default, primary renderer) or `md` (plain
     /// Markdown / GFM, D38).
+    ///
+    /// Note (typst + local images): if the document embeds a local image
+    /// (`![[file.png]]` or a `::figure` with a local path), compile the
+    /// output with `typst compile --root / <file>.typ` — without an
+    /// explicit `--root` covering the image's absolute path, typst treats
+    /// leading `/` as root-relative (not OS-absolute) and fails with
+    /// "file not found".
     #[arg(long = "format", value_enum, default_value_t = RenderFormat::Typst)]
     format: RenderFormat,
 
@@ -262,7 +269,7 @@ fn main() {
 /// エラーではない)。Warning は他コマンドと同じく stderr に出す。
 fn run_search(args: SearchArgs) {
     match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        InputMode::Workspace(members) => run_search_workspace(members, args),
+        InputMode::Workspace(members, assets) => run_search_workspace(members, assets, args),
         InputMode::Single(file) => run_search_single(file, args),
     }
 }
@@ -299,11 +306,11 @@ fn run_search_single(file: PathBuf, args: SearchArgs) {
     run_search_query(&idx, &args);
 }
 
-fn run_search_workspace(members: Vec<strata_build::Member>, args: SearchArgs) {
+fn run_search_workspace(members: Vec<strata_build::Member>, assets: strata_build::AssetIndex, args: SearchArgs) {
     let sources: BTreeMap<String, String> =
         members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    let ws = match strata_build::build_workspace(&members) {
+    let ws = match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -386,7 +393,7 @@ fn print_switcher_hits(hits: &[strata_search::SwitcherHit]) {
 /// 0 = 成功。Warning は他コマンドと同じく stderr に出しつつ exit 0 を妨げない。
 fn run_context(args: ContextArgs) {
     match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        InputMode::Workspace(members) => run_context_workspace(members, args),
+        InputMode::Workspace(members, assets) => run_context_workspace(members, assets, args),
         InputMode::Single(file) => run_context_single(file, args),
     }
 }
@@ -433,11 +440,11 @@ fn run_context_single(file: PathBuf, args: ContextArgs) {
 /// `strata-cli context --workspace`(WP-Z1、D44)。`strata_build::build_workspace` →
 /// `strata_context::render_context_workspace` を直結する(単一文書版と同じ
 /// exit code の慣習)。
-fn run_context_workspace(members: Vec<strata_build::Member>, args: ContextArgs) {
+fn run_context_workspace(members: Vec<strata_build::Member>, assets: strata_build::AssetIndex, args: ContextArgs) {
     let sources: BTreeMap<String, String> =
         members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    let ws = match strata_build::build_workspace(&members) {
+    let ws = match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -506,7 +513,7 @@ fn run_view(args: ViewArgs) {
     };
 
     match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        InputMode::Workspace(members) => run_view_workspace(members, view, &args),
+        InputMode::Workspace(members, assets) => run_view_workspace(members, assets, view, &args),
         InputMode::Single(file) => run_view_single(file, view, &args),
     }
 }
@@ -554,11 +561,16 @@ fn run_view_single(file: PathBuf, view: strata_view::ViewDef, args: &ViewArgs) {
 
 /// `strata view --workspace`(WP-W3.1)。`strata build --workspace` と同じ
 /// エラー表示(ファイル名付き)を再利用する。
-fn run_view_workspace(members: Vec<strata_build::Member>, view: strata_view::ViewDef, args: &ViewArgs) {
+fn run_view_workspace(
+    members: Vec<strata_build::Member>,
+    assets: strata_build::AssetIndex,
+    view: strata_view::ViewDef,
+    args: &ViewArgs,
+) {
     let sources: BTreeMap<String, String> =
         members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    let out = match strata_build::build_workspace(&members) {
+    let out = match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -729,14 +741,28 @@ struct StrataToml {
 struct WorkspaceToml {
     /// strata.toml からの相対パス。グロブ可(`glob` クレート、WP-W2.1)。
     members: Vec<String>,
+    /// image-support-handoff.md item 1: 画像等のバイナリアセットを列挙するglob
+    /// (例: `assets = ["assets/**/*"]`)。D41「スキャンしない」原則を踏襲(member と
+    /// 同じくglobは明示指定のみ)。省略可(`#[serde(default)]`) — 画像を使わない
+    /// ワークスペースは既存の `strata.toml` のまま変更不要。
+    #[serde(default)]
+    assets: Vec<String>,
 }
 
-/// `strata.toml` を読み、`members` を展開して全メンバーのソースを読み込む
-/// (WP-W2.1)。グロブ文字(`*`/`?`/`[`)を含まないエントリはグロブを経由せず直接
-/// 読む(存在しなければ明確な I/O エラーになる — グロブに通すと0件マッチが
-/// 「黙って空」になりかねないため、D40 の教訓どおり黙って落とさない)。
-/// `Member::path` は診断表示用の相対パス文字列(strata.toml のディレクトリ基準)。
-fn load_workspace_members(toml_path: &Path) -> Result<Vec<strata_build::Member>, String> {
+/// image-support-handoff.md item 1: 画像embedとして認識する拡張子
+/// (大小文字は許容、比較時に小文字化する)。判定基準そのものは
+/// `strata_sml::inline::IMAGE_ASSET_EXTS` を正本として再利用する(パーサ側の
+/// `![[target]]` 拡張子判定と `assets` グロブのスキャンでドリフトしないように)。
+use strata_sml::inline::IMAGE_ASSET_EXTS;
+
+/// `strata.toml` を読み、`members`/`assets` を展開する(WP-W2.1、image-support-handoff.md
+/// item 1)。`members` のグロブ文字(`*`/`?`/`[`)を含まないエントリはグロブを経由せず
+/// 直接読む(存在しなければ明確な I/O エラーになる — グロブに通すと0件マッチが
+/// 「黙って空」になりかねないため、D40 の教訓どおり黙って落とさない)。`assets` は
+/// 画像が無いワークスペースの方が普通なので、0件マッチでもエラーにしない
+/// (member との非対称、裁量)。`Member::path` は診断表示用の相対パス文字列
+/// (strata.toml のディレクトリ基準)。
+fn load_workspace(toml_path: &Path) -> Result<(Vec<strata_build::Member>, strata_build::AssetIndex), String> {
     let toml_src = fs::read_to_string(toml_path)
         .map_err(|e| format!("Failed to read {}: {}", toml_path.display(), e))?;
     let parsed: StrataToml =
@@ -769,15 +795,39 @@ fn load_workspace_members(toml_path: &Path) -> Result<Vec<strata_build::Member>,
         let display_path = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().into_owned();
         members.push(strata_build::Member { path: display_path, src });
     }
-    Ok(members)
+
+    let mut assets: strata_build::AssetIndex = HashMap::new();
+    for pattern in &parsed.workspace.assets {
+        let full_pattern = base.join(pattern);
+        let matches_iter = glob::glob(&full_pattern.to_string_lossy())
+            .map_err(|e| format!("strata.toml の assets グロブ '{pattern}' が不正です: {e}"))?;
+        for path in matches_iter.filter_map(Result::ok) {
+            if !path.is_file() {
+                continue;
+            }
+            let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
+            if !IMAGE_ASSET_EXTS.contains(&ext.to_ascii_lowercase().as_str()) {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let abs = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            assets.entry(name.to_string()).or_default().push(abs.to_string_lossy().into_owned());
+        }
+    }
+    for paths in assets.values_mut() {
+        paths.sort();
+        paths.dedup();
+    }
+
+    Ok((members, assets))
 }
 
 /// `BuildArgs`/`ViewArgs` 共通: `file`/`--workspace` の組み合わせを検証し、
-/// ワークスペースモードなら展開済みメンバー列、単一ファイルモードならそのファイルの
-/// パスを返す。両方指定・両方省略はエラー(exit 2)。
+/// ワークスペースモードなら展開済みメンバー列+アセットインデックス、単一ファイル
+/// モードならそのファイルのパスを返す。両方指定・両方省略はエラー(exit 2)。
 enum InputMode {
     Single(PathBuf),
-    Workspace(Vec<strata_build::Member>),
+    Workspace(Vec<strata_build::Member>, strata_build::AssetIndex),
 }
 
 fn resolve_input_mode(file: Option<PathBuf>, workspace: Option<PathBuf>) -> InputMode {
@@ -791,8 +841,8 @@ fn resolve_input_mode(file: Option<PathBuf>, workspace: Option<PathBuf>) -> Inpu
             std::process::exit(2);
         }
         (Some(f), None) => InputMode::Single(f),
-        (None, Some(w)) => match load_workspace_members(&w) {
-            Ok(members) => InputMode::Workspace(members),
+        (None, Some(w)) => match load_workspace(&w) {
+            Ok((members, assets)) => InputMode::Workspace(members, assets),
             Err(e) => {
                 eprintln!("{}", e);
                 std::process::exit(2);
@@ -804,8 +854,8 @@ fn resolve_input_mode(file: Option<PathBuf>, workspace: Option<PathBuf>) -> Inpu
 /// `strata-cli build` サブコマンド(docs/sml-build-m3-handoff.md D-B6、
 /// `--workspace` は WP-W2.2)。
 fn run_build(args: BuildArgs) {
-    if let InputMode::Workspace(members) = resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        run_build_workspace(members, args.output);
+    if let InputMode::Workspace(members, assets) = resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        run_build_workspace(members, assets, args.output);
         return;
     }
     let file = args.file.expect("resolve_input_mode returned Single only when file is Some");
@@ -859,11 +909,11 @@ fn run_build(args: BuildArgs) {
 
 /// `strata-cli build --workspace` サブコマンド(WP-W2.2)。全メンバーを一括パースし、
 /// 横断参照を解決した単一の統合グラフ(`WorkspaceBuildOutput`)を出力する。
-fn run_build_workspace(members: Vec<strata_build::Member>, output: Option<PathBuf>) {
+fn run_build_workspace(members: Vec<strata_build::Member>, assets: strata_build::AssetIndex, output: Option<PathBuf>) {
     let sources: BTreeMap<String, String> =
         members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    match strata_build::build_workspace(&members) {
+    match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -947,7 +997,7 @@ fn format_workspace_error(e: &strata_build::WorkspaceError, sources: &BTreeMap<S
 /// `root: None`(フロントマター無し)は D21 の案内文言で exit 2(両フォーマット共通)。
 fn run_render(args: RenderArgs) {
     match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        InputMode::Workspace(members) => run_render_workspace(members, args),
+        InputMode::Workspace(members, assets) => run_render_workspace(members, assets, args),
         InputMode::Single(file) => run_render_single(file, args),
     }
 }
@@ -1039,11 +1089,11 @@ fn run_render_single(file: PathBuf, args: RenderArgs) {
 /// 再生成不能(M7 の既知副作用)を解消する。`--doc` 省略時は全メンバーを、指定時は
 /// 当該文書のみを出力する。出力は常に `-o <outdir>`(既定カレントディレクトリ)配下に
 /// `<メンバーのファイル名 stem>.<拡張子>` として書く。
-fn run_render_workspace(members: Vec<strata_build::Member>, args: RenderArgs) {
+fn run_render_workspace(members: Vec<strata_build::Member>, assets: strata_build::AssetIndex, args: RenderArgs) {
     let sources: BTreeMap<String, String> =
         members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    let ws = match strata_build::build_workspace(&members) {
+    let ws = match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -1290,6 +1340,33 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
                 line, col, title
             )]
         }
+        // image-support-handoff.md item 2: 単一ファイル build で `![[target]]` 画像embedに
+        // 遭遇した。`WikilinkNeedsWorkspace` と同じ理由でワークスペース build を案内する。
+        E::AssetNeedsWorkspace { target, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: AssetNeedsWorkspace: 画像embed '![[{}]]' はワークスペース対応コマンド(`strata build --workspace <strata.toml>` または `strata render --workspace <strata.toml>`)が必要です。",
+                line, col, target
+            )]
+        }
+        // image-support-handoff.md item 2: ワークスペース build で `![[target]]` の
+        // target がどの `assets` にも一致しない。
+        E::UnresolvedAsset { target, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: UnresolvedAsset: 画像embed '![[{}]]' — このファイル名を持つアセットが `assets` に見つかりません。",
+                line, col, target
+            )]
+        }
+        // image-support-handoff.md item 2: ワークスペース build で `![[target]]` の
+        // target(basename)が2つ以上の実ファイルに一致する(同名衝突)。
+        E::AmbiguousAsset { target, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: AmbiguousAsset: 画像embed '![[{}]]' — 同じファイル名を持つアセットが複数あり一意に解決できません。",
+                line, col, target
+            )]
+        }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }
 }
@@ -1377,10 +1454,20 @@ fn run_site(args: SiteArgs) {
         std::process::exit(2);
     }
 
-    let site_graph = match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
-        InputMode::Workspace(members) => build_site_graph_workspace(members),
+    let mut site_graph = match resolve_input_mode(args.file.clone(), args.workspace.clone()) {
+        InputMode::Workspace(members, assets) => build_site_graph_workspace(members, assets),
         InputMode::Single(file) => build_site_graph_single(file),
     };
+
+    // image-support-handoff.md item 7: グラフ中の全 `ImageFigure.src`(絶対パスのもの)
+    // を `<output>/assets/` へ実コピーし、graph.json 上の src を相対パスへ書き換える。
+    // ワークスペース/単一ファイルどちらの build 結果でも(`::figure` の src= は
+    // ワークスペース無しでも書けるため)同じ経路を通す。
+    let assets_dir = args.output.join("assets");
+    if let Err(e) = localize_asset_images(&mut site_graph.graph, &assets_dir) {
+        eprintln!("Failed to copy image assets into {}: {}", assets_dir.display(), e);
+        std::process::exit(1);
+    }
 
     if let Err(e) = fs::create_dir_all(&args.output) {
         eprintln!("Failed to create output directory {}: {}", args.output.display(), e);
@@ -1444,10 +1531,10 @@ fn build_site_graph_single(file: PathBuf) -> SiteGraphJson {
 
 /// ワークスペース build から `SiteGraphJson` を合成する(`WorkspaceBuildOutput` を
 /// ほぼそのまま写すだけ — `warnings` を落とす点のみが違う)。
-fn build_site_graph_workspace(members: Vec<strata_build::Member>) -> SiteGraphJson {
+fn build_site_graph_workspace(members: Vec<strata_build::Member>, assets: strata_build::AssetIndex) -> SiteGraphJson {
     let sources: BTreeMap<String, String> = members.iter().map(|m| (m.path.clone(), m.src.clone())).collect();
 
-    let out = match strata_build::build_workspace(&members) {
+    let out = match strata_build::build_workspace_with_assets(&members, &assets) {
         Err(errors) => {
             for e in &errors {
                 for line in format_workspace_error(e, &sources) {
@@ -1493,4 +1580,72 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// image-support-handoff.md item 7: グラフ中の全 `Figure::Image` ノードを走査し、
+/// `src` がローカル絶対パス(`starts_with("http")` でない、item 3 の判別規約)なら
+/// `assets_dir`(`<output>/assets/`)へ実コピーしたうえで、`src` をそこからの相対パス
+/// (`assets/<basename>`)へ書き換える(絶対パスのまま出力すると生成物を他マシンへ
+/// 配布したときに壊れるため)。リモート URL の `src` はそのまま(コピー不要)。
+///
+/// - 同じ絶対パスが複数の `Figure::Image` から参照されていれば1回だけコピーする。
+/// - 異なる絶対パスが同じ basename を持つ(衝突)場合は `<stem>-2.<ext>`,
+///   `<stem>-3.<ext>`… と連番でリネームする(裁量、最終報告参照 — `assets`
+///   インデックス経由の `![[target]]` embedは basename の一意性が保証されるため
+///   通常起こらないが、`::figure` の `src=` は自由記述の絶対パスなので、別ディレクトリの
+///   同名ファイルを指す2つの `::figure` が共存しうる)。
+/// - ローカルパスなのに実在しないファイルはコピーせず `src` もそのまま残し、stderr に
+///   警告を出す(exit code には影響させない — build 側では画像ファイルの実在チェック
+///   まではしていないため、ここで初めて欠落が分かるケースがある)。
+fn localize_asset_images(graph: &mut strata_core::Graph, assets_dir: &Path) -> std::io::Result<()> {
+    let mut used_names: HashMap<String, PathBuf> = HashMap::new();
+    let mut copied: HashMap<PathBuf, String> = HashMap::new();
+
+    for node in graph.nodes.values_mut() {
+        let strata_core::NodePayload::Figure(strata_core::Figure::Image(img)) = &mut node.payload else {
+            continue;
+        };
+        if img.src.is_empty() || img.src.starts_with("http") {
+            continue;
+        }
+        let src_path = PathBuf::from(&img.src);
+        if let Some(existing_name) = copied.get(&src_path) {
+            img.src = format!("assets/{existing_name}");
+            continue;
+        }
+        if !src_path.is_file() {
+            eprintln!("警告: 画像ファイルが見つかりません(サイトへコピーできません): {}", img.src);
+            continue;
+        }
+        let orig_name = src_path.file_name().and_then(|n| n.to_str()).unwrap_or("image").to_string();
+        let final_name = unique_asset_name(&orig_name, &used_names);
+        fs::create_dir_all(assets_dir)?;
+        fs::copy(&src_path, assets_dir.join(&final_name))?;
+        used_names.insert(final_name.clone(), src_path.clone());
+        copied.insert(src_path, final_name.clone());
+        img.src = format!("assets/{final_name}");
+    }
+    Ok(())
+}
+
+/// `orig_name` が `used_names` に既出なら `<stem>-2.<ext>`, `-3`, … と衝突しない名前を
+/// 探す(`localize_asset_images` 用)。
+fn unique_asset_name(orig_name: &str, used_names: &HashMap<String, PathBuf>) -> String {
+    if !used_names.contains_key(orig_name) {
+        return orig_name.to_string();
+    }
+    let path = Path::new(orig_name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(orig_name);
+    let ext = path.extension().and_then(|e| e.to_str());
+    let mut n = 2u32;
+    loop {
+        let candidate = match ext {
+            Some(ext) => format!("{stem}-{n}.{ext}"),
+            None => format!("{stem}-{n}"),
+        };
+        if !used_names.contains_key(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
