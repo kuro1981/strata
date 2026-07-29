@@ -367,21 +367,21 @@ fmt が行う変更は4種類だけ([D10](ref:decisions/d10)〜[D12](ref:decisio
 - 外部リンク用スキーム(`url:` 等)の導入と、無診断フォールバックの是非(§5.2) {#01KYP3EMGW72H78J431YMDVZS4}
 - member label 構文の最終形(`- key "label"` は初版案) {#01KYP3EMGW72H78J431YMDVZS5}
 - `defines` エッジの SML 表現(用語定義ブロックの記法)— 当面は [D9](ref:decisions/d9) の Term 自動生成で参照側だけ成立させる。定義ブロック記法が入った時点で `defines` エッジを接続 {#01KYP3EMGW72H78J431YMDVZS6}
-- ~~ファイル横断のエイリアス~~ (→ [D41](ref:decisions/d41)〜[D43](ref:decisions/d43) で v0 解消。ワークスペース層 M7) {#01KYP3EMGW72H78J431YMDVZS7}
+- ~~ファイル横断のエイリアス~~(→ [D41](ref:decisions/d41)〜[D43](ref:decisions/d43) で v0 解消。ワークスペース層 M7) {#01KYP3EMGW72H78J431YMDVZS7}
 - ワークスペース v0.5: **context / render の横断**(MD ページ間リンク、横断近傍抽出)と、cross-doc 参照を含む文書の単一ファイル render の扱い([D43](ref:decisions/d43)) {#01KYP3EMGW72H78J431YMDVZS8}
 - **index の永続化・インクリメンタル更新**(redb 等。[D42](ref:decisions/d42) — 大規模化時に別裁定。永続 index も常に再構築可能な派生物とし、正本性を持たせない) {#01KYP3EMGW72H78J431YMDVZS9}
 - リスト項目の中の複数ブロック(項目=段落1つ、を当面の制約とする。ネストは [D24](ref:decisions/d24) で解禁) {#01KYP3EMGW72H78J431YMDVZSA}
-- ~~インラインテキスト中のリテラル `[` `$` 等のエスケープ~~ (→ [D40](ref:decisions/d40) で解消) {#01KYP3EMGW72H78J431YMDVZSB}
+- ~~インラインテキスト中のリテラル `[` `$` 等のエスケープ~~(→ [D40](ref:decisions/d40) で解消) {#01KYP3EMGW72H78J431YMDVZSB}
 - GFM 脚注(`[^1]`。[D40](ref:decisions/d40) で保留継続 — 定義行の可視化事故だけは [D40](ref:decisions/d40) の参照スタイルリンク処理と併せて要注意) {#01KYP3EMGW72H78J431YMDVZSC}
 - Obsidian 埋め込み `![[target]]`([D59](ref:decisions/d59) の wikilink は対応するが埋め込みは対象外。画像/ノート埋め込みの区別・トランスクルージョン(§10 既出項目)との関係を要検討) {#01KYP3EMGW72H78J431YMDVZSD}
 - Dataview インラインフィールド(`key:: value`)・callout(`> [!note]`)— [D59](ref:decisions/d59) の実データ調査で低頻度(各1〜2件/304ファイル)を確認、実害が増えたら再検討 {#01KYP3EMGW72H78J431YMDVZSE}
-- ~~リスト項目の継続行(lazy continuation)~~ (→ [D52](ref:decisions/d52) で解消): 項目本文を折り返した継続行(`- 長い文…\n  続き`)が無診断で別段落ブロックに分断される(M6 監査の取りこぼし、2026-07-15 の notes ドッグフーディングで発見。②「静かに壊れる」級 — 診断を出すか継続行を項目に併合するか要裁定) {#01KYP3EMGW72H78J431YMDVZSF}
-- ~~文書そのものを指す参照記法~~ (→ [D53](ref:decisions/d53) で doc: スキーム採用。旧状: 「H1 に alias=top」規約で代用 — notes vault の運用規約に記載。`ref:<文書alias>` 単独で Document ノードを指せる方が自然か要裁定) {#01KYP3EMGW72H78J431YMDVZSG}
+- ~~リスト項目の継続行(lazy continuation)~~(→ [D52](ref:decisions/d52) で解消): 項目本文を折り返した継続行(`- 長い文…\n  続き`)が無診断で別段落ブロックに分断される(M6 監査の取りこぼし、2026-07-15 の notes ドッグフーディングで発見。②「静かに壊れる」級 — 診断を出すか継続行を項目に併合するか要裁定) {#01KYP3EMGW72H78J431YMDVZSF}
+- ~~文書そのものを指す参照記法~~(→ [D53](ref:decisions/d53) で doc: スキーム採用。旧状: 「H1 に alias=top」規約で代用 — notes vault の運用規約に記載。`ref:<文書alias>` 単独で Document ノードを指せる方が自然か要裁定) {#01KYP3EMGW72H78J431YMDVZSG}
 - フロントマターのキー追加(authors・date 等。v0 は id / title のみ) {#01KYP3EMGW72H78J431YMDVZSH}
 - インラインの出し分け(見出し・段落内の一部スパンだけを class 分類する記法。[D23](ref:decisions/d23) のブロック単位では実名の 【実際: 〇〇】 のようなインライン情報を扱えない) {#01KYP3EMGW72H78J431YMDVZSJ}
 - **値のトランスクルージョン**(`cell:` 等の参照先の**値**を本文・セルに埋め込み表示する記法。現状の参照はリンクのみで、同じ事実の二重記述を防げない — v0 でメタ行 30 件の DRY 違反として定量化。当面は「表を正として重複側を削除」で回避) {#01KYP3EMGW72H78J431YMDVZSK}
 - **エンティティ**(会社・人物など同一実体の表記ゆれを束ねるノード。`term:` は用語専用。v0 では正規化+前方一致のあいまい一致で代用した) {#01KYP3EMGW72H78J431YMDVZSM}
-- ~~ビュー定義の `template`/`concat` コンビネータ~~ (→ [D45](ref:decisions/d45) で concat 採用。例: `"{details}({level})"`。[D35](ref:decisions/d35) で見送り — 実需が出た時点で [D32](ref:decisions/d32) の運用に従い再裁定) {#01KYP3EMGW72H78J431YMDVZSN}
+- ~~ビュー定義の `template`/`concat` コンビネータ~~(→ [D45](ref:decisions/d45) で concat 採用。例: `"{details}({level})"`。[D35](ref:decisions/d35) で見送り — 実需が出た時点で [D32](ref:decisions/d32) の運用に従い再裁定) {#01KYP3EMGW72H78J431YMDVZSN}
 - テンプレート・マニフェストの拡張(M5-C 盲検デモ 2026-07-15 の知見): per-field の**型ヒント**(`--check` は存在検査のみで `as: int` の欠落を検出できない)と per-field の**自由記述ノート**(「志望動機はデータに無ければ健康状態・趣味等から構成する」のような業務意図の伝達)。デモの結論: 「LLM 提案 → `--check` → 人間批准」は**二段ゲート**(機械検査+人間の diff レビュー)として成立(盲検で1反復収束・7ファイル中5バイト一致・値117/118一致)。`--check` 通過のみでの自動採用は不可 {#01KYP3EMGW72H78J431YMDVZSP}
 - **ビュー/テンプレート層**(ドッグフーディング定性評価より): JIS 履歴書のような既存テンプレートへの pull 型流し込み(テンプレートが先にあり、グラフから埋める)、リスト/拡張表現をビュー側で表に組み替える変換、ビュー定義(体裁カスタム・class フィルタのプロファイル)を文書外ファイルとして持つ仕組み。M5(AI ビュー)と地続き。2026-07-15 の壁打ちでの骨格合意: {#01KYP3EMGW72H78J431YMDVZSQ}
   - **バインディング層**の新設 — グラフの意味構造とテンプレートのスロットスキーマの対応表(ER 図的な2スキーマ間マッピング)。CSS(流れの装飾)では足りず、XSLT / headless CMS(クエリ+コンポーネント)の系譜。ミスマッチはアドレス・粒度・多重度の3種 {#01KYP3EMGW72H78J431YMDVZSR}

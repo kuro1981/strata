@@ -622,7 +622,7 @@ frontmatter キーは**分類**(tags/status 等 → [D46](ref:d46) `class` 機�
 論点は、インポート能力の置き場所であり、まずスキル、ツールは将来とすることである。
 
 [id=01KYP2K28MRTEH7ZWSQN2CG9CM, alias=d62-decision, depends-on=d37]
-Obsidian → SML の変換は**まず AI エージェント駆動のスキル**として提供する(新規 Rust バイナリを今は作らない)。既存の [D37](ref:d37) (AI が SML を書き fmt/build が検証)と M5-C(AI がバインディング案を出し人間が批准)をそのまま流用: AI が vault の frontmatter 実態を調査 → [D61](ref:d61) のマッピング仕様を提案 → 人間が批准 → その仕様に従って AI が各ファイルを SML ドラフトに変換 → fmt/build で検証。決定的ツールへの昇格は、view-def([D30](ref:d30)〜[D35](ref:d35))と同じく実運用で型が安定してから判断する(「使ってから裁定」)。
+Obsidian → SML の変換は**まず AI エージェント駆動のスキル**として提供する(新規 Rust バイナリを今は作らない)。既存の [D37](ref:d37)(AI が SML を書き fmt/build が検証)と M5-C(AI がバインディング案を出し人間が批准)をそのまま流用: AI が vault の frontmatter 実態を調査 → [D61](ref:d61) のマッピング仕様を提案 → 人間が批准 → その仕様に従って AI が各ファイルを SML ドラフトに変換 → fmt/build で検証。決定的ツールへの昇格は、view-def([D30](ref:d30)〜[D35](ref:d35))と同じく実運用で型が安定してから判断する(「使ってから裁定」)。
 
 ## パイロット移行(00_Daily 34件・Clippings 47件)の裁定(2026-07-29 対話にて確定) {#01KYP2K28MRTEH7ZWSQN2CG9CN alias=obsidian-pilot-migration}
 

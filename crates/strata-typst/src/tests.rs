@@ -625,3 +625,174 @@ fn doc_ref_in_workspace_mode_uses_workspace_doc_title() {
     assert!(out.text.contains("型付きリンクは「なぜ繋いだか」を保存する"), "{}", out.text);
     assert!(!out.text.contains("#link"), "{}", out.text);
 }
+
+// --- Typst 括弧隣接バグの回帰(docs/typst-paren-bug-handoff.md) ----------------
+//
+// `#link(...)[...]` / `#strike[...]` のような「chainable な呼び出し + 末尾 content
+// ブロック」の直後に、空白を挟まず `(` が続くと、Typst のパーサがこれを同じ式への
+// 追加引数と誤解釈してコンパイルエラーになる(手元の `typst compile` で実証済み)。
+// `CHAIN_GUARD`(空コメント `/**/`)を必要な箇所にだけ挟むことで防ぐ。
+
+#[test]
+fn strike_immediately_followed_by_open_paren_gets_chain_guard() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Emph { kind: EmphKind::Strike, children: vec![Inline::Text { s: "取消線".into() }] },
+            Inline::Text { s: "(直後に括弧)".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#strike[取消線]/**/(直後に括弧)"), "{out}");
+}
+
+#[test]
+fn external_link_immediately_followed_by_open_paren_gets_chain_guard() {
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Link { url: "https://example.com".into(), text: "表示".into() },
+            Inline::Text { s: "(直後に括弧)".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#link(\"https://example.com\")[表示]/**/(直後に括弧)"), "{out}");
+}
+
+#[test]
+fn ref_with_text_immediately_followed_by_open_paren_gets_chain_guard() {
+    let target_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_id, NodePayload::List(List { ordered: false, start: None })));
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Ref { to: target_id, rel: Rel::RefersTo, coord: None, text: "表示".into() },
+            Inline::Text { s: "(直後に括弧)".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains(&format!("#link(<{}>)[表示]/**/(直後に括弧)", target_id.0)), "{out}");
+}
+
+#[test]
+fn ref_immediately_followed_by_open_bracket_gets_chain_guard() {
+    // `(` だけでなく `[` も chain continuation を誘発する(`#strike[a][b]` は
+    // 「2個目の content ブロック引数」として食われ `unexpected argument` になることを
+    // `typst compile` で確認済み)。text 無し・番号無し対象の「§」代替表記でも同じ問題が
+    // 起きるため、こちらも guard 対象。
+    let target_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(target_id, NodePayload::List(List { ordered: false, start: None })));
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Ref { to: target_id, rel: Rel::RefersTo, coord: None, text: String::new() },
+            Inline::Text { s: "[直後の角括弧]".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains(&format!("#link(<{}>)[§]/**/", target_id.0)), "{out}");
+}
+
+#[test]
+fn strike_at_end_of_paragraph_does_not_get_unnecessary_chain_guard() {
+    // 直後に何も続かない(段落末尾)場合にまで無条件で `/**/` を挟むと、既存の golden
+    // フィクスチャや出力が不必要に汚れる。実際に隣接が危険な場合にのみ挟むことを確認。
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![Inline::Emph { kind: EmphKind::Strike, children: vec![Inline::Text { s: "取消線".into() }] }],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#strike[取消線]"), "{out}");
+    assert!(!out.contains("/**/"), "guard must not be inserted when nothing dangerous follows: {out}");
+}
+
+#[test]
+fn strike_followed_by_space_then_text_does_not_get_unnecessary_chain_guard() {
+    // 空白を挟んだ隣接は元々安全(Typst の chain continuation は空白なし直接隣接時のみ)。
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Emph { kind: EmphKind::Strike, children: vec![Inline::Text { s: "取消線".into() }] },
+            Inline::Text { s: " です。".into() },
+        ],
+    ));
+
+    let out = render_to_typst(&g, para_id, "fallback").unwrap();
+    assert!(out.contains("#strike[取消線] です。"), "{out}");
+    assert!(!out.contains("/**/"), "guard must not be inserted when a space already separates: {out}");
+}
+
+/// ハンドオフの最小再現ケース(Ref/Strike 双方)を実際に文書全体としてレンダリングし、
+/// `typst` CLI がローカルに存在すればそれで `typst compile` まで通す(D-R2/ハンドオフ
+/// 「検証」節 1.)。CI 環境等で `typst` が入っていない場合は黙ってスキップする
+/// (バイナリの有無に `cargo test --workspace` の green/red を左右させないため)。
+#[test]
+fn minimal_repro_cases_compile_with_typst_when_binary_available() {
+    let has_typst =
+        std::process::Command::new("typst").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    if !has_typst {
+        eprintln!("typst バイナリが見つからないためスキップ(typst compile 検証)");
+        return;
+    }
+
+    let doc_id = NodeId::new();
+    let target_id = NodeId::new();
+    let para_id = NodeId::new();
+    let mut g = Graph::default();
+    g.insert(Node::new(doc_id, NodePayload::Document(Document { title: Some("括弧バグ再現".into()) })));
+    g.insert(Node::new(target_id, NodePayload::List(List { ordered: false, start: None })));
+    g.insert(para(
+        para_id,
+        vec![
+            Inline::Ref { to: target_id, rel: Rel::RefersTo, coord: None, text: "表示".into() },
+            Inline::Text { s: "(→ D40 で議論)".into() },
+            Inline::Emph { kind: EmphKind::Strike, children: vec![Inline::Text { s: "取消線".into() }] },
+            Inline::Text { s: "(直後に括弧)".into() },
+        ],
+    ));
+    // target_id (List) を先に置き、para_id からその label を参照する形にする
+    // (見出しルート = Document、両方とも Contains で子として実際に描画されるようにする)。
+    g.link(doc_id, Rel::Contains, target_id, Some(0));
+    g.link(doc_id, Rel::Contains, para_id, Some(1));
+
+    let out = render_to_typst(&g, doc_id, "fallback").expect("render must succeed");
+
+    let tmp_dir = std::env::temp_dir().join(format!("strata-typst-paren-bug-test-{}", std::process::id()));
+    std::fs::create_dir_all(&tmp_dir).expect("create tmp dir");
+    let typ_path = tmp_dir.join("repro.typ");
+    let pdf_path = tmp_dir.join("repro.pdf");
+    std::fs::write(&typ_path, &out).expect("write .typ");
+
+    let result = std::process::Command::new("typst")
+        .arg("compile")
+        .arg(&typ_path)
+        .arg(&pdf_path)
+        .output()
+        .expect("run typst compile");
+
+    assert!(
+        result.status.success(),
+        "typst compile must succeed on the rendered output:\n--- stderr ---\n{}\n--- .typ ---\n{}",
+        String::from_utf8_lossy(&result.stderr),
+        out
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}

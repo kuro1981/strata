@@ -402,58 +402,86 @@ impl<'a> TypstRenderer<'a> {
         Ok(out)
     }
 
+    /// docs/typst-paren-bug-handoff.md: `#link(...)[...]` / `#strike[...]` のように
+    /// 「chainable な呼び出し + 末尾 content ブロック」の形で終わる断片は、直後の断片が
+    /// `(` または `[` で始まると Typst に式の続きとして食われる(詳細は `CHAIN_GUARD` の
+    /// doc)。ここでは各インライン要素を「本体文字列」と「末尾が chainable か」に分けて
+    /// レンダリングし、実際に危険な隣接が発生する箇所にだけ `CHAIN_GUARD` を挟む
+    /// (無条件挿入すると golden フィクスチャのような「実際には隣接していない」箇所まで
+    /// 汚してしまうため、必要箇所に絞る設計にした — 最終報告参照)。
     fn render_inlines(&mut self, inlines: &[Inline]) -> Result<String, String> {
-        let mut out = String::new();
+        let mut fragments: Vec<(String, bool)> = Vec::with_capacity(inlines.len());
         for inline in inlines {
-            match inline {
-                Inline::Text { s } => {
-                    out.push_str(&typst_escape(s));
-                }
-                Inline::Emph { kind, children } => {
-                    let inner = self.render_inlines(children)?;
-                    match kind {
-                        EmphKind::Strong => out.push_str(&format!("*{}*", inner)),
-                        EmphKind::Em => out.push_str(&format!("_{}_", inner)),
-                        EmphKind::Code => out.push_str(&format!("`{}`", inner)),
-                        // M6(D40 Tier2): 取消線。
-                        EmphKind::Strike => out.push_str(&format!("#strike[{}]", inner)),
-                    };
-                }
-                Inline::Math { tree } => {
-                    let math_str = self.render_math(tree);
-                    out.push_str(&format!("${}$", math_str));
-                }
-                Inline::Ref { to, text, coord, .. } => {
-                    out.push_str(&self.render_ref(*to, text, coord.as_ref()));
-                }
-                Inline::Term { to, text } => {
-                    out.push_str(&self.render_term(*to, text));
-                }
-                Inline::Anchor { to } => {
-                    if let Some(NodePayload::Anchor(a)) = self.graph.nodes.get(to).map(|n| &n.payload) {
-                        let inner = self.render_inlines(&a.inline)?;
-                        out.push_str(&format!("[{}] <{}>", inner, label(*to)));
-                    }
-                }
-                // M6(D40): 外部リンク → Typst の #link(URL)[表示テキスト]。
-                Inline::Link { url, text } => {
-                    let display = if text.is_empty() { url } else { text };
-                    out.push_str(&format!("#link(\"{}\")[{}]", typst_string_escape(url), typst_escape(display)));
-                }
-                // M6(D40): インライン画像。紙面ではリモート URL を実描画しない
-                // (Typst の image() はローカルパス前提)ため、alt + URL リンクの
-                // プレースホルダ表記にする(裁量、最終報告参照)。
-                Inline::Image { url, alt } => {
-                    out.push_str(&format!(
-                        "[画像: {}] (#link(\"{}\")[{}])",
-                        typst_escape(alt),
-                        typst_string_escape(url),
-                        typst_escape(url)
-                    ));
-                }
+            fragments.push(self.render_inline_fragment(inline)?);
+        }
+
+        let mut out = String::new();
+        for i in 0..fragments.len() {
+            out.push_str(&fragments[i].0);
+            let ends_chainable = fragments[i].1;
+            let next_starts_dangerous =
+                fragments.get(i + 1).is_some_and(|(next, _)| next.starts_with('(') || next.starts_with('['));
+            if ends_chainable && next_starts_dangerous {
+                out.push_str(CHAIN_GUARD);
             }
         }
         Ok(out)
+    }
+
+    /// `render_inlines` の1要素分。戻り値の `bool` は「本体文字列が chainable な呼び出し
+    /// (`#link(...)[...]` / `#strike[...]`)の閉じ `]` で終わっており、直後に `(`/`[` が
+    /// 来ると Typst に式の続きとして解釈されてしまう」かどうか。
+    fn render_inline_fragment(&mut self, inline: &Inline) -> Result<(String, bool), String> {
+        Ok(match inline {
+            Inline::Text { s } => (typst_escape(s), false),
+            Inline::Emph { kind, children } => {
+                let inner = self.render_inlines(children)?;
+                match kind {
+                    EmphKind::Strong => (format!("*{}*", inner), false),
+                    EmphKind::Em => (format!("_{}_", inner), false),
+                    EmphKind::Code => (format!("`{}`", inner), false),
+                    // M6(D40 Tier2): 取消線。`#strike[...]` は chainable。
+                    EmphKind::Strike => (format!("#strike[{}]", inner), true),
+                }
+            }
+            Inline::Math { tree } => {
+                let math_str = self.render_math(tree);
+                (format!("${}$", math_str), false)
+            }
+            Inline::Ref { to, text, coord, .. } => self.render_ref(*to, text, coord.as_ref()),
+            Inline::Term { to, text } => (self.render_term(*to, text), false),
+            Inline::Anchor { to } => {
+                let text = if let Some(NodePayload::Anchor(a)) = self.graph.nodes.get(to).map(|n| &n.payload) {
+                    let inner = self.render_inlines(&a.inline)?;
+                    format!("[{}] <{}>", inner, label(*to))
+                } else {
+                    String::new()
+                };
+                // 素の `[...]`(先頭に `#` を伴わない)は Typst の呼び出し連鎖を形成しない
+                // (単なるリテラルの角括弧文字として扱われる。`typst compile` で確認済み)
+                // ため chainable ではない。
+                (text, false)
+            }
+            // M6(D40): 外部リンク → Typst の #link(URL)[表示テキスト]。chainable。
+            Inline::Link { url, text } => {
+                let display = if text.is_empty() { url } else { text };
+                (format!("#link(\"{}\")[{}]", typst_string_escape(url), typst_escape(display)), true)
+            }
+            // M6(D40): インライン画像。紙面ではリモート URL を実描画しない
+            // (Typst の image() はローカルパス前提)ため、alt + URL リンクの
+            // プレースホルダ表記にする(裁量、最終報告参照)。全体が末尾の `)` で閉じる
+            // (bare literal な閉じ括弧であり `#link(...)[...]` の閉じ `]` ではない)ため
+            // chainable ではない。
+            Inline::Image { url, alt } => {
+                let text = format!(
+                    "[画像: {}] (#link(\"{}\")[{}])",
+                    typst_escape(alt),
+                    typst_string_escape(url),
+                    typst_escape(url)
+                );
+                (text, false)
+            }
+        })
     }
 
     /// D22: `Ref` の描画。
@@ -469,7 +497,11 @@ impl<'a> TypstRenderer<'a> {
     /// 出せない(Typst のラベル自体が存在しなくなる)ため、`Warning` を積んだうえで
     /// リンクを剥がしたプレーンテキストへフォールバックする(`text` があれば
     /// `text`、無ければ短い代替表記「(非表示)」)。
-    fn render_ref(&mut self, to: NodeId, text: &str, coord: Option<&CellCoord>) -> String {
+    /// 戻り値の `bool` は `render_inline_fragment` と同じ意味(本体が chainable な
+    /// `#link(<..>)[...]` の閉じ `]` で終わるか)。`@label` や退化テキストの各分岐は
+    /// `#ident(...)[...]` の形を取らない(`@` は参照リテラル、他は素の escaped text)ため
+    /// 非 chainable(`typst compile` で `@label(...)` が誤解釈されないことを確認済み)。
+    fn render_ref(&mut self, to: NodeId, text: &str, coord: Option<&CellCoord>) -> (String, bool) {
         let coord_suffix = coord.map(format_coord).unwrap_or_default();
 
         if self.is_hidden(to) {
@@ -477,11 +509,12 @@ impl<'a> TypstRenderer<'a> {
                 "-:-: warning: HiddenRef: 参照先 {} は --hide により非表示です。リンクを外しプレーンテキスト化しました。",
                 label(to)
             ));
-            return if !text.is_empty() {
+            let text = if !text.is_empty() {
                 format!("{}{}", typst_escape(text), coord_suffix)
             } else {
                 format!("(非表示){}", coord_suffix)
             };
+            return (text, false);
         }
 
         // D53(2026-07-16 裁定、sml-spec.md §1.14): `doc:` 参照(Document ノード直指し)。
@@ -495,7 +528,7 @@ impl<'a> TypstRenderer<'a> {
             });
             let title = workspace_title.unwrap_or_else(|| self.document_title_fallback(to));
             let base = if !text.is_empty() { typst_escape(text) } else { typst_escape(&title) };
-            return format!("{}{}", base, coord_suffix);
+            return (format!("{}{}", base, coord_suffix), false);
         }
 
         // D44: クロスドキュメント参照(対象が今描画中の文書と異なる)は、単一ファイル
@@ -516,22 +549,28 @@ impl<'a> TypstRenderer<'a> {
                     None => "参照".to_string(),
                 }
             };
-            return format!("{}{}（{}）", base, coord_suffix, typst_escape(&doc_title));
+            return (format!("{}{}（{}）", base, coord_suffix, typst_escape(&doc_title)), false);
         }
 
         if !text.is_empty() {
-            return format!("#link(<{}>)[{}{}]", label(to), typst_escape(text), coord_suffix);
+            return (format!("#link(<{}>)[{}{}]", label(to), typst_escape(text), coord_suffix), true);
         }
 
         match self.graph.nodes.get(&to).map(|n| &n.payload) {
             Some(NodePayload::Table(_)) | Some(NodePayload::Math(_)) | Some(NodePayload::Figure(_)) => {
-                format!("@{}", label(to))
+                (format!("@{}", label(to)), false)
             }
             Some(NodePayload::Section(s)) => {
-                format!("#link(<{}>)[{}{}]", label(to), typst_escape(&self.plain_text(&s.heading)), coord_suffix)
+                let t = format!(
+                    "#link(<{}>)[{}{}]",
+                    label(to),
+                    typst_escape(&self.plain_text(&s.heading)),
+                    coord_suffix
+                );
+                (t, true)
             }
-            Some(_) => format!("#link(<{}>)[§{}]", label(to), coord_suffix),
-            None => format!("#link(<{}>)[参照{}]", label(to), coord_suffix),
+            Some(_) => (format!("#link(<{}>)[§{}]", label(to), coord_suffix), true),
+            None => (format!("#link(<{}>)[参照{}]", label(to), coord_suffix), true),
         }
     }
 
@@ -714,6 +753,10 @@ impl<'a> TypstRenderer<'a> {
                     },
                     _ => "値".to_string(),
                 };
+                // D28: 表セル/record 値の `Ref` はセル自身の `[...]` の中で完結し、直後に
+                // 別インライン要素の literal text が地続きで来ることが無い(常に呼び出し側
+                // の `format!("    [{}],\n", ...)` で `]` に閉じられる)ため、
+                // render_inlines の chain-guard 対象(`CHAIN_GUARD`)には該当しない。
                 format!("#link(<{}>)[{}]", label(*to), inner)
             }
             CellValue::Quantity { v, unit } => format!("{} {}", v, typst_escape(unit)),
@@ -846,6 +889,34 @@ fn mark_to_str(m: Mark) -> &'static str {
         Mark::Area => "area",
     }
 }
+
+/// docs/typst-paren-bug-handoff.md: `#link(...)[...]` / `#strike[...]` のように
+/// 「関数呼び出し + 末尾 content ブロック `[...]`」の形で終わる Typst 式は、直後に
+/// 空白を挟まず `(` や `[` が続くと、Typst のパーサがそれを**同じ式への追加引数/
+/// 追加 content ブロック**と誤解釈する(呼び出し結果である content 値は呼び出し不可能
+/// なため `unknown variable: ...` 等のコンパイルエラーになる)。原因は Typst の
+/// 「呼び出し連鎖(chain call)」文法—`f(...)[...]` の直後に空白なしで `(...)` や
+/// `[...]` が続くと、字句的に隙間が無い限りどこまでも同じ式の続きとして食われ続ける—
+/// にある。
+///
+/// ハンドオフが第一候補として挙げた `#{ ... }`(code-mode グループ)包みは実際には
+/// **効かない**: `#{link(...)[...]}` も式全体としては依然 chainable で、直後の `(`/`[`
+/// をやはり追加引数として食ってしまうことを `typst compile` で実証済み(第二候補の
+/// `#h(0pt)` 挿入も同様に不十分—`h(0pt)` 自体が chainable な呼び出しなので、直後の
+/// `(...)` をやはり自身の追加引数として食ってしまう)。
+///
+/// 効くのは、字句レベルで「隙間」を作ること。Typst の空コメント `/**/` はトリビア
+/// (トークン間の空白と同様に扱われ、出力には一切現れない)なので、chainable な式の
+/// 直後にこれを1つ挟むと、後続文字が `(` だろうと `[` だろうと(あるいは何であろうと)
+/// 連鎖が構文的に断ち切られる。つまり `CHAIN_GUARD` 自体は後続文字を選ばない汎用の
+/// 区切りであり、「`(` の場合だけ特別扱いする」ような対症療法ではない。
+///
+/// 挿入位置は `render_inlines` 側で「実際に次の断片が `(`/`[` から始まる場合にのみ」に
+/// 絞っている(無条件に全 chainable 箇所へ挿入すると、危険な隣接が無い既存の golden
+/// フィクスチャ等まで無意味に汚してしまうため — 出力を汚さない範囲での適用が目的で、
+/// `CHAIN_GUARD` という区切り手段そのものの汎用性とは別の話)。
+/// `typst compile` で確認済み(視覚的な出力差分なし、行頭/行末を含む各種文脈で動作)。
+const CHAIN_GUARD: &str = "/**/";
 
 /// Typst マークアップ(コンテンツモード)向けのエスケープ。
 fn typst_escape(s: &str) -> String {
