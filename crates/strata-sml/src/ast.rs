@@ -56,6 +56,13 @@ pub struct Frontmatter {
     /// キーが無ければ `None`。字句は他の alias と同じ `[A-Za-z0-9_-]+`
     /// (不正なら `BadKeyCharset`)。
     pub alias: Option<(String, Span)>,
+    /// `class: <値>` の生の属性値(D61、sml-spec §1.19)とその値スパン。D46 の実効
+    /// class(自身+祖先)は Document が最上位祖先なので、ここに書いた class は文書
+    /// 直下の全ブロックへ自然に継承される。値構文はブロック前置属性行の `class=`
+    /// と同一(`block::parse_attr_value` を再利用、単一/リスト両対応)。字句
+    /// (`[A-Za-z0-9_-]+`)の検証はここでは行わず build(strata-build)が担う
+    /// (ブロックの `class=` と同じ役割分担)。キーが無ければ `None`。
+    pub class: Option<(AttrValue, Span)>,
     /// 閉じ `---` 単独行の内容スパン(改行を含まない)。ファイル末尾まで閉じが
     /// 見つからなかった場合はファイル末尾の空スパン(`UnclosedFrontmatter` と併発)。
     pub close_span: Span,
@@ -232,6 +239,15 @@ pub enum RefScheme {
     /// sml-spec.md §1.14)。target は他スキームと違い `<doc>/<alias>` のスラッシュ修飾を
     /// 取らない(文書そのものを指すので「文書内のブロック」という第2階層が無い)。
     Doc,
+    /// `[[target]]` / `[[target|表示テキスト]]`(Obsidian wikilink、D59、
+    /// sml-spec.md §1.18)。target は文書**タイトル**の文字列(字句制限なし、`term:` と
+    /// 同様 — スキーム付き記法ではなくブラケット記法なので `RefTarget::Ulid` /
+    /// `DocLabel` には決してならず、常に `RefTarget::Label(生のタイトル文字列)`)。
+    /// 解決(タイトル完全一致・大文字小文字区別・NFC 正規化)は build の仕事
+    /// (`doc:` と同じくワークスペース全体の index が要る)。canonical では他の
+    /// `Ref` 同様、解決後は対象 Document ノードへの通常の `Edge(rel: refers-to)` に
+    /// なる — wikilink 由来という情報は保持しない(D59 裁定どおり)。
+    Wikilink,
 }
 
 /// `cell:` 参照の座標(sml-spec §5.3): `<行path>|<列path>`。

@@ -9,8 +9,8 @@
 //! オフセットを `scan::scan_from` に渡すことで、残りのブロック列を通常どおり
 //! 走査させる。
 
-use crate::ast::{Frontmatter, RefTarget};
-use crate::block::parse_ref_target;
+use crate::ast::{AttrValue, Frontmatter, RefTarget};
+use crate::block::{parse_attr_value, parse_ref_target};
 use crate::error::{Diag, DiagKind};
 use crate::scan::{split_lines_range, PhysLine};
 use crate::span::Span;
@@ -33,7 +33,7 @@ pub(crate) fn parse_frontmatter(src: &str, diags: &mut Vec<Diag>) -> (Option<Fro
         // 閉じが無い: ファイル末尾まで飲み込み、best-effort で id/title/alias を拾いつつ
         // UnclosedFrontmatter を報告する(scan.rs の UnclosedFence と同じ方針)。
         let last = lines.len() - 1;
-        let (id, title, alias) = parse_body(src, &lines[1..], diags);
+        let (id, title, alias, class) = parse_body(src, &lines[1..], diags);
         diags.push(Diag::new(
             DiagKind::UnclosedFrontmatter,
             open_span,
@@ -46,31 +46,38 @@ pub(crate) fn parse_frontmatter(src: &str, diags: &mut Vec<Diag>) -> (Option<Fro
             id,
             title,
             alias,
+            class,
             close_span: Span::new(end, end),
         };
         return (Some(fm), end);
     };
 
-    let (id, title, alias) = parse_body(src, &lines[1..close_idx], diags);
+    let (id, title, alias, class) = parse_body(src, &lines[1..close_idx], diags);
     let close_span = lines[close_idx].content;
     let body_start = lines[close_idx].full.end;
-    let fm = Frontmatter { span: Span::new(0, body_start), open_span, id, title, alias, close_span };
+    let fm = Frontmatter { span: Span::new(0, body_start), open_span, id, title, alias, class, close_span };
     (Some(fm), body_start)
 }
 
 /// 開き `---` と閉じ `---` の間の行を `key: value` として解釈する(コロン後の空白は
-/// 任意)。空行は無視する。キーが `id` / `title` / `alias` 以外なら
-/// `UnknownFrontmatterKey`(D41、v0 の許可キーは3つ)。`id` の値が ULID でなければ
+/// 任意)。空行は無視する。キーが `id` / `title` / `alias` / `class`(D61、
+/// sml-spec §1.19)以外なら `UnknownFrontmatterKey`(v0 の許可キーは4つ。D60により
+/// `Warning` — 「出たら足す」方針の安全網)。`id` の値が ULID でなければ
 /// `BadIdValue`(sml-spec §2.1)。`alias` の値が key 字句(`[A-Za-z0-9_-]+`)に
-/// 違反すれば `BadKeyCharset`。同一キーが複数回現れたら `DuplicateFrontmatterKey`
-/// (D17、`Warning`)。挙動は従来どおり後勝ち(最後の出現が採用される)のまま変えない。
-/// `parse_body` の戻り値: `(id, title, alias)`。
-type FrontmatterBody = (Option<(RefTarget, Span)>, Option<String>, Option<(String, Span)>);
+/// 違反すれば `BadKeyCharset`。`class` の値はブロック前置属性行の `class=` と同じ
+/// 構文(`block::parse_attr_value` を再利用、単一/リスト)で読むだけに留め、字句
+/// 検証(`[A-Za-z0-9_-]+`)は build 側(strata-build、ブロックの `class=` と同じ経路)
+/// に委ねる。同一キーが複数回現れたら `DuplicateFrontmatterKey`(D17、`Warning`)。
+/// 挙動は従来どおり後勝ち(最後の出現が採用される)のまま変えない。
+/// `parse_body` の戻り値: `(id, title, alias, class)`。
+type FrontmatterBody =
+    (Option<(RefTarget, Span)>, Option<String>, Option<(String, Span)>, Option<(AttrValue, Span)>);
 
 fn parse_body(src: &str, lines: &[PhysLine], diags: &mut Vec<Diag>) -> FrontmatterBody {
     let mut id = None;
     let mut title = None;
     let mut alias = None;
+    let mut class = None;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for line in lines {
@@ -130,17 +137,23 @@ fn parse_body(src: &str, lines: &[PhysLine], diags: &mut Vec<Diag>) -> Frontmatt
                 }
                 alias = Some((value.to_string(), value_span));
             }
+            "class" => {
+                // D61: 値構文はブロック前置属性行の `class=` と同一(単一/引用符/リスト)。
+                // 字句(`[A-Za-z0-9_-]+`)の検証はここでは行わない(build 側が
+                // `apply_class_attr` で担う。ブロックの class= と同じ役割分担)。
+                class = Some((parse_attr_value(value), value_span));
+            }
             _ => {
                 diags.push(Diag::new(
                     DiagKind::UnknownFrontmatterKey,
                     line.content,
-                    format!("未知のフロントマターキー '{key}' です(v0 は id / title / alias のみ)"),
+                    format!("未知のフロントマターキー '{key}' です(v0 は id / title / alias / class のみ)"),
                 ));
             }
         }
     }
 
-    (id, title, alias)
+    (id, title, alias, class)
 }
 
 /// key 字句(`[A-Za-z0-9_-]+`)の検証(D5)。block.rs / inline.rs にも同名の

@@ -794,7 +794,10 @@ fn parse_attr_entries(src: &str, inner_span: Span, diags: &mut Vec<Diag>) -> Vec
     entries
 }
 
-fn parse_attr_value(value_raw: &str) -> AttrValue {
+/// 属性値の構文(単一 / 引用符付き / リスト)を解釈する。属性行(`[key=value]`)専用に
+/// 書かれたが、D61(sml-spec §1.19)によりフロントマターの `class:` 値もこの構文を
+/// そのまま再利用するため `pub(crate)` にしている(`frontmatter.rs` から呼ばれる)。
+pub(crate) fn parse_attr_value(value_raw: &str) -> AttrValue {
     if value_raw.len() >= 2 && value_raw.starts_with('"') && value_raw.ends_with('"') {
         return AttrValue::Quoted(value_raw[1..value_raw.len() - 1].to_string());
     }

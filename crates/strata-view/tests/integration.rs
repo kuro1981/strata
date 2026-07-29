@@ -568,6 +568,43 @@ files:
     assert_eq!(yaml, "[]\n");
 }
 
+/// D61(2026-07-29 裁定、sml-spec §1.19): フロントマターの `class:` は D46 により
+/// Document(最上位祖先)から文書直下の全ブロックへ継承されるため、view の class
+/// フィルタ(`rows: contains` の `exclude-class`)が「文書全体を選ぶ/除く」ことに
+/// 使えることの確認。ブロック側には一切 class を書いていない。
+#[test]
+fn rows_contains_exclude_class_with_frontmatter_class_excludes_the_whole_document() {
+    let src = "\
+---
+id: 01ARZ3NDEKTSV4RRFFQ69G5FA0
+class: draft
+---
+
+# parent {#01ARZ3NDEKTSV4RRFFQ69G5FAV alias=parent}
+
+## 案件A {#01ARZ3NDEKTSV4RRFFQ69G5FA1 alias=proj-a}
+
+## 案件B {#01ARZ3NDEKTSV4RRFFQ69G5FA2 alias=proj-b}
+";
+    let view = r#"
+version: 1
+profiles: [submit]
+files:
+  x.yaml:
+    content:
+      rows:
+        contains: { alias: parent }
+        type: section
+        exclude-class: draft
+        item:
+          fields:
+            name: { pick: { of: self } }
+"#;
+    let yaml = yaml_of(src, view);
+    // 文書全体が draft class を実効的に持つので、直接の子(案件A/B)は両方ともスキップされる。
+    assert_eq!(yaml, "[]\n");
+}
+
 /// D23/D46 の submit/check 分離ユースケース(docs/view-def-v1.md §4.3 の例と対応):
 /// note クラスのセクションを submit の行反復から除外しつつ、check profile では
 /// フィルタ自体が独立して評価されること(profile 分岐とクラスフィルタの併用)。

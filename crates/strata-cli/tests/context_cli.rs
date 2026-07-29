@@ -104,6 +104,33 @@ id: 01J2T8Z1000000000000000000
     assert!(text.contains("位置: 職務経歴"));
 }
 
+/// D61(2026-07-29 裁定、sml-spec §1.19): フロントマターの `class:` は D46 の実効
+/// class 継承により文書直下の全ブロックへ及ぶため、`--class` にその class を渡すと
+/// 文書全体(全ブロック)が横断列挙される(「文書全体を選ぶ」が正しく機能する確認)。
+#[test]
+fn context_class_scope_with_frontmatter_class_selects_the_whole_document() {
+    let tmp = TempDir::new("context-frontmatter-class");
+    let file = tmp.path().join("doc.sml");
+    let src = "\
+---
+id: 01J2T8Z1000000000000000000
+class: draft
+---
+
+# 職務経歴 {#01J2T8Z2000000000000000000}
+
+[id=01J2T8Z3000000000000000000]
+本文です。
+";
+    std::fs::write(&file, src).unwrap();
+
+    let out = run(&["context", file.to_str().unwrap(), "--class", "draft"]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+    let text = stdout_str(&out);
+    assert!(text.contains("職務経歴"));
+    assert!(text.contains("本文です"));
+}
+
 /// フロントマター無し(root: None)で全文書スコープを要求すると exit 2。
 #[test]
 fn context_without_frontmatter_and_no_scope_exits_2() {

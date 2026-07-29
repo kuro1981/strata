@@ -260,6 +260,43 @@ fn class_scope_container_chunking_is_deterministic() {
     assert_eq!(a, b);
 }
 
+// --- D61(2026-07-29 裁定、sml-spec §1.19): フロントマター class -----------------------
+
+/// フロントマターの `class:` は Document ノード自身に付く。Document は不可視の
+/// ルート(render_block は何も出力しない)なので、chunk の根の選定で素通しせず
+/// 「文書直下の全トップレベルブロック」を根にする必要がある(D61 実装時に見つけた
+/// バグの回帰テスト — 修正前は「位置: ...」の見出しだけが出て本文が空になっていた)。
+const FRONTMATTER_CLASS_FIXTURE: &str = "---\n\
+id: 01HZZZZZZZZZZZZZZZZZZZZZZ0\n\
+class: draft\n\
+---\n\
+\n\
+# 見出し1 {#01HZZZZZZZZZZZZZZZZZZZZZZ1}\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ2]\n\
+段落その1。\n\
+\n\
+# 見出し2 {#01HZZZZZZZZZZZZZZZZZZZZZZ3}\n\
+\n\
+[id=01HZZZZZZZZZZZZZZZZZZZZZZ4]\n\
+段落その2。\n";
+
+#[test]
+fn class_scope_with_frontmatter_class_covers_the_whole_document_body() {
+    let build = strata_build::build(FRONTMATTER_CLASS_FIXTURE).unwrap();
+    let opts = ContextOptions { nodes: vec![], hops: 1, class: Some("draft".to_string()) };
+    let out = render_context(&build, &opts).unwrap();
+
+    // Document 自身は非表示のまま、直下の全トップレベルブロックが本文として出る。
+    assert!(out.contains("見出し1"));
+    assert!(out.contains("段落その1"));
+    assert!(out.contains("見出し2"));
+    assert!(out.contains("段落その2"));
+    // 「位置:」はトップレベルブロックの数(2つの見出しがそれぞれ chunk の根)だけ出る。
+    let loc_count = out.matches("位置:").count();
+    assert_eq!(loc_count, 2, "文書直下のトップレベルブロックが chunk の根になるはず:\n{out}");
+}
+
 // --- D48: rel `revises` ------------------------------------------------------------
 
 /// `revises=` 属性が張るエッジが `context` の「エッジ」節に `revises:` として現れ、

@@ -41,6 +41,15 @@ struct Builder<'a> {
     /// `reg.alias_table` 経由で解決できるので、ここが `None` でも自己参照は解決できる。
     /// `None` かつ自文書 alias にも一致しない場合のみ `DocRefNeedsWorkspace`)。
     doc_index: Option<&'a HashMap<String, NodeId>>,
+    /// D59: `[[wikilink]]` のワークスペース全体解決 index(正規化タイトル → その
+    /// タイトルを持つ Document ノード群の NodeId)。`doc_index` と違い `Vec` を持つのは
+    /// 「同名衝突」検出のため(2件以上あれば `AmbiguousWikilink`)。単一ファイル build
+    /// では `None`(このときは `self_title` による自己参照のみ解決できる)。
+    title_index: Option<&'a HashMap<String, Vec<NodeId>>>,
+    /// D59: 自文書のタイトル(`title::document_title` の結果を正規化したもの)。
+    /// 単一ファイル build でも自己参照(`[[自分のタイトル]]`)を解決するために使う
+    /// (`doc:` スキームが `reg.alias_table` で自文書 alias を先に見るのと同型)。
+    self_title: Option<String>,
 }
 
 /// Pass 2 が複数ファイルにまたがって共有する可変状態(WP-W2: ワークスペース統合)。
@@ -67,7 +76,9 @@ pub(crate) fn run(
     shared: &mut SharedState,
     cross_doc: Option<&CrossDocIndex>,
     doc_index: Option<&HashMap<String, NodeId>>,
+    title_index: Option<&HashMap<String, Vec<NodeId>>>,
 ) -> (Option<NodeId>, Vec<BuildError>) {
+    let self_title = crate::title::document_title(src, doc).map(|t| crate::title::normalize_title(&t));
     let mut b = Builder {
         src,
         reg,
@@ -78,12 +89,25 @@ pub(crate) fn run(
         hr_count: 0,
         cross_doc,
         doc_index,
+        title_index,
+        self_title,
     };
 
     let root = b.reg.document_id;
     if let Some(doc_id) = root {
         let title = doc.frontmatter.as_ref().and_then(|fm| fm.title.clone());
         b.graph.insert(Node::new(doc_id, NodePayload::Document(Document { title })));
+        // D61(sml-spec §1.19): フロントマターの class を Document ノードの
+        // Node.classes へ格納する。ブロック前置属性行の class=(D23)と同じ
+        // `apply_class_attr`(字句検証・BadClass 診断込み)を再利用する — Document も
+        // 他ノードと同じ Node.classes フィールドを共有しているため専用の経路は不要。
+        // D46(実効 class = 自身+祖先)により Document は最上位祖先なので、ここに
+        // 格納した class は `parent_index`/`effective_classes` 経由で文書直下の全
+        // ブロックへ自然に継承される(render --hide / context --class / view の
+        // class フィルタは既存の共有ヘルパをそのまま使うため追加対応は不要)。
+        if let Some((value, span)) = doc.frontmatter.as_ref().and_then(|fm| fm.class.as_ref()) {
+            b.apply_class_attr(doc_id, value, *span);
+        }
     }
 
     let mut stack: Vec<(u8, NodeId)> = Vec::new();
@@ -431,6 +455,52 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `[[wikilink]]` の target(D59)。文書**タイトル**の完全一致で解決する — `ref:`/
+    /// `doc:` のような alias 表ではなく `title_index`(正規化タイトル → NodeId 群)を
+    /// 引く。
+    ///
+    /// - まず `title_index` が `Some`(ワークスペース build)なら、それだけで解決する。
+    ///   index には自文書も含まれる(`workspace.rs` が全メンバーぶん組む)ため、自己
+    ///   参照もここで一貫して解決される — 「同名衝突」はそれが自己参照かどうかに
+    ///   関わらずタイトルの性質として判定する(D59「黙って先頭を選ばない」を自己参照にも
+    ///   一貫して適用する裁量、最終報告参照)
+    /// - `title_index` が `None`(単一ファイル build)なら、`self_title` との一致だけを
+    ///   試す(自己参照のみ成立させる、D59「単一ファイル build でも自己参照は成立してよい」)
+    /// - どちらでも解決できなければ `WikilinkNeedsWorkspace`
+    fn resolve_wikilink_target(&mut self, target: &RefTarget, span: Span) -> NodeId {
+        let raw = match target {
+            // inline.rs の wikilink パースは常に `RefTarget::Label` だけを生成する
+            // (ULID/DocLabel は生成しない)。到達すれば防御的にそのまま扱う。
+            RefTarget::Ulid(u) => return NodeId(*u),
+            RefTarget::Label(l) => l.clone(),
+            RefTarget::DocLabel { doc, .. } => doc.clone(),
+        };
+        let normalized = crate::title::normalize_title(&raw);
+
+        if let Some(idx) = self.title_index {
+            return match idx.get(&normalized) {
+                Some(ids) if ids.len() == 1 => ids[0],
+                Some(ids) if ids.len() > 1 => {
+                    self.errors.push(BuildError::AmbiguousWikilink { title: raw, span });
+                    NodeId::new()
+                }
+                _ => {
+                    self.errors.push(BuildError::UnresolvedWikilink { title: raw, span });
+                    NodeId::new()
+                }
+            };
+        }
+
+        if let (Some(self_title), Some(doc_id)) = (&self.self_title, self.reg.document_id)
+            && *self_title == normalized
+        {
+            return doc_id;
+        }
+
+        self.errors.push(BuildError::WikilinkNeedsWorkspace { title: raw, span });
+        NodeId::new()
+    }
+
     /// doc 修飾参照(`<文書alias>/<ブロックalias>`)の共通解決ロジック。
     /// - `cross_doc: None`(単一ファイル build、`--workspace` 無し)→ `CrossDocRef`
     ///   (黙って落とさず `--workspace` の必要性を案内する、WP-W1.3)
@@ -515,10 +585,12 @@ impl<'a> Builder<'a> {
             }
             SmlInline::Ref { scheme, target, coord, text } => {
                 let text_str = text.slice(self.src).to_string();
-                let to = if *scheme == RefScheme::Doc {
-                    self.resolve_doc_ref_target(target, *text)
-                } else {
-                    self.resolve_ref_target(target, *text)
+                let to = match scheme {
+                    RefScheme::Doc => self.resolve_doc_ref_target(target, *text),
+                    // D59: wikilink はタイトル一致という専用の解決方式を持つ(alias 表を
+                    // 引く `resolve_ref_target` とは別経路)。
+                    RefScheme::Wikilink => self.resolve_wikilink_target(target, *text),
+                    _ => self.resolve_ref_target(target, *text),
                 };
                 self.validate_scheme(*scheme, to, *text);
                 let coord = coord.as_ref().map(|c| CoreCellCoord { row_path: c.row_path.clone(), col_path: c.col_path.clone() });
@@ -553,6 +625,10 @@ impl<'a> Builder<'a> {
             RefScheme::Cell => Some(NodeKindTag::Table),
             // D53: `doc:` は Document ノードのみを指せる。
             RefScheme::Doc => Some(NodeKindTag::Document),
+            // D59: wikilink の解決先は常に Document ノード(`resolve_wikilink_target` が
+            // タイトル一致で返すのは常に文書の NodeId)。防御的な検証(通常は
+            // `RefTypeMismatch` には到達しない)。
+            RefScheme::Wikilink => Some(NodeKindTag::Document),
         };
         let Some(expected) = expected else { return };
         let Some(&actual) = self.reg.node_kind.get(&to) else { return };

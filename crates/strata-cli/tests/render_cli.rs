@@ -177,6 +177,41 @@ id: 01J2T8Z1000000000000000000
     assert!(err.contains("HiddenRef"), "stderr: {err}");
 }
 
+// ---- D61(2026-07-29 裁定、sml-spec §1.19): フロントマター class -----------------
+
+/// フロントマターの `class:` は D46(実効 class=自身+祖先)により Document が最上位
+/// 祖先として文書直下の全ブロックへ継承されるため、`--hide` に文書全体の class を
+/// 渡すと本文がまるごと消える(「文書全体を隠す」が正しく機能することの確認)。
+#[test]
+fn render_hide_with_frontmatter_class_hides_the_whole_document_body() {
+    let tmp = TempDir::new("render-hide-frontmatter-class");
+    let file = tmp.path().join("doc.sml");
+    let src = "\
+---
+id: 01J2T8Z1000000000000000000
+class: draft
+---
+
+# 職務経歴 {#01J2T8Z2000000000000000000}
+
+[id=01J2T8Z3000000000000000000]
+本文です。
+";
+    std::fs::write(&file, src).unwrap();
+
+    // 確認版(--hide なし): 本文がそのまま残る。
+    let check = run(&["render", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&check), 0, "stderr: {}", stderr_str(&check));
+    assert!(stdout_str(&check).contains("本文です"));
+
+    // 提出版(--hide draft): 文書直下の全ブロックがフロントマター class を継承して消える。
+    let hidden = run(&["render", "--hide", "draft", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&hidden), 0, "stderr: {}", stderr_str(&hidden));
+    let out = stdout_str(&hidden);
+    assert!(!out.contains("本文です"), "{out}");
+    assert!(!out.contains("職務経歴"), "{out}");
+}
+
 // ---- D38(md-render-handoff.md WP-M3): `render --format md` -----------------------
 
 fn golden_md() -> String {

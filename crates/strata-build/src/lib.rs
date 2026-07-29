@@ -16,6 +16,7 @@ mod list_child;
 mod math;
 mod resolve;
 mod term;
+mod title;
 mod workspace;
 
 pub use error::BuildError;
@@ -53,11 +54,13 @@ pub fn build(src: &str) -> Result<BuildOutput, Vec<BuildError>> {
 
     let registry = resolve::build_registry(&parsed.doc, &mut errors);
     let mut shared = convert::SharedState::new();
-    // 単一ファイル build には cross_doc/doc_index が無い(`None`)。doc 修飾参照
-    // (`<文書alias>/<ブロックalias>`)に遭遇すると `BuildError::CrossDocRef` になる
+    // 単一ファイル build には cross_doc/doc_index/title_index が無い(`None`)。doc 修飾
+    // 参照(`<文書alias>/<ブロックalias>`)に遭遇すると `BuildError::CrossDocRef` になる
     // (WP-W1.3、`--workspace` の必要性を案内)。`doc:` 参照(D53)は自文書 alias だけは
     // それでも解決できる(`resolve_doc_ref_target` が `reg.alias_table` を先に見る)。
-    let (root, pass2_errors) = convert::run(src, &parsed.doc, registry, &mut shared, None, None);
+    // `[[wikilink]]`(D59)も同型: 自文書タイトルとの一致だけは解決できる
+    // (`convert::run` が毎回 `self_title` を算出する)。
+    let (root, pass2_errors) = convert::run(src, &parsed.doc, registry, &mut shared, None, None, None);
     errors.extend(pass2_errors);
 
     if !errors.is_empty() {

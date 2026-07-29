@@ -18,6 +18,11 @@
 //!     `SmlInline::Link`。`![alt](url)` → `SmlInline::Image`
 //!   - `[text][label]` + 文書中の定義行 `[label]: url` → `SmlInline::Link`
 //!     (未解決ラベルはリテラル維持、CommonMark 準拠)
+//!   - `[[target]]` / `[[target|表示テキスト]]`(Obsidian wikilink、D59、sml-spec
+//!     §1.18)→ `SmlInline::Ref { scheme: RefScheme::Wikilink, .. }`。target はタイトル
+//!     文字列(字句制限なし)。`|` 前後の空白は許容。埋め込み `![[target]]` は対象外
+//!     (§10 保留、`!` 直前があれば wikilink として扱わず素通し)。解決(タイトル一致)は
+//!     build の仕事
 //!
 //! スキーム別の target 字句規則:
 //!   - `ref` / `table` / `fig` / `math` / `cell` の target: ULID(26字 Crockford)なら
@@ -180,6 +185,21 @@ fn parse_span(src: &str, span: Span, diags: &mut Vec<Diag>, refdefs: &RefDefs) -
                     i += 1;
                 }
             }
+            // D59: `[[target]]` / `[[target|text]]`(Obsidian wikilink)。埋め込み
+            // `![[target]]`(§10 保留、スコープ外)と区別するため、直前のバイトが `!`
+            // なら wikilink としては扱わない(下の通常 `[` 分岐へフォールスルーし、
+            // 結局どちらの分岐も閉じ括弧の形が合わず素通し=リテラルになる。既存の
+            // `![[target]]` の挙動を変えない)。
+            b'[' if i + 1 < end && bytes[i + 1] == b'[' && (i == span.start || bytes[i - 1] != b'!') => {
+                if let Some((node, next_i)) = try_parse_wikilink(src, i, end) {
+                    flush_text(&mut out, text_start, i);
+                    out.push(node);
+                    i = next_i;
+                    text_start = i;
+                } else {
+                    i += 1;
+                }
+            }
             b'[' => {
                 if let Some((node, next_i)) = try_parse_link(src, i, end, diags) {
                     flush_text(&mut out, text_start, i);
@@ -333,6 +353,66 @@ fn try_parse_image(src: &str, bang: usize, limit: usize, diags: &mut Vec<Diag>) 
     }
 
     Some((SmlInline::Image { url: dest_span, alt: alt_span }, next_i))
+}
+
+/// 次に現れる連続バイト `a, b` の開始絶対オフセットを `[start, limit)` の範囲で探す
+/// (D59: `]]` の探索用)。
+fn find_double(bytes: &[u8], start: usize, limit: usize, a: u8, b: u8) -> Option<usize> {
+    let mut i = start;
+    while i + 1 < limit {
+        if bytes[i] == a && bytes[i + 1] == b {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `span` の前後の空白(Unicode 空白含む)を取り除いた部分 span を返す。バイト
+/// オフセットは元の `src` に対するものを維持する(D59: `[[target|text]]` の `|`
+/// 前後の空白許容に使う)。
+fn trim_span(src: &str, span: Span) -> Span {
+    let s = span.slice(src);
+    let trimmed = s.trim();
+    let start_off = s.len() - s.trim_start().len();
+    let start = span.start + start_off;
+    Span::new(start, start + trimmed.len())
+}
+
+/// `[[target]]` / `[[target|表示テキスト]]`(Obsidian wikilink、D59、sml-spec §1.18)を
+/// `open`(最初の `[` の位置。`bytes[open]`・`bytes[open+1]` が両方 `[` であることは
+/// 呼び出し側で確認済み)から試しにパースする。
+///
+/// - `|` の前後の空白は許容(trim する)
+/// - 閉じ `]]` が無い、または target/表示テキストが(trim 後に)空の場合は `None`
+///   (呼び出し側が寛容にリテラルへフォールバックする — 他の参照記法と同じ方針。
+///   診断は出さない)
+/// - target は文字種の制限を課さない(`term:` と同様、タイトルは任意の文字列)。
+///   タイトル一致による解決(NFC 正規化・重複検出等)は build の仕事
+fn try_parse_wikilink(src: &str, open: usize, limit: usize) -> Option<(SmlInline, usize)> {
+    let bytes = src.as_bytes();
+    let content_start = open + 2;
+    let close = find_double(bytes, content_start, limit, b']', b']')?;
+    let next_i = close + 2;
+    let content = Span::new(content_start, close);
+
+    if let Some(pipe_rel) = content.slice(src).find('|') {
+        let pipe_abs = content_start + pipe_rel;
+        let target_span = trim_span(src, Span::new(content_start, pipe_abs));
+        let display_span = trim_span(src, Span::new(pipe_abs + 1, close));
+        if target_span.is_empty() || display_span.is_empty() {
+            return None;
+        }
+        let target = RefTarget::Label(target_span.slice(src).to_string());
+        Some((SmlInline::Ref { scheme: RefScheme::Wikilink, target, coord: None, text: display_span }, next_i))
+    } else {
+        let target_span = trim_span(src, content);
+        if target_span.is_empty() {
+            return None;
+        }
+        let target = RefTarget::Label(target_span.slice(src).to_string());
+        Some((SmlInline::Ref { scheme: RefScheme::Wikilink, target, coord: None, text: target_span }, next_i))
+    }
 }
 
 /// `[text](scheme:target...)` を `i`(`[` の位置)から試しにパースする。
@@ -841,5 +921,102 @@ mod tests {
         let (out, diags) = parse(src);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    // ---- D59(2026-07-29 裁定): Obsidian `[[wikilink]]` -----------------------------
+
+    #[test]
+    fn bare_wikilink_parses_as_wikilink_ref() {
+        let src = "[[目的地]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Wikilink, target: RefTarget::Label(l), text, coord } => {
+                assert_eq!(l, "目的地");
+                assert_eq!(text.slice(src), "目的地");
+                assert!(coord.is_none());
+            }
+            other => panic!("expected wikilink ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piped_wikilink_uses_separate_display_text() {
+        let src = "[[目的地|表示テキスト]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Wikilink, target: RefTarget::Label(l), text, .. } => {
+                assert_eq!(l, "目的地");
+                assert_eq!(text.slice(src), "表示テキスト");
+            }
+            other => panic!("expected wikilink ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn piped_wikilink_trims_whitespace_around_pipe() {
+        let src = "[[ target  |  display text ]]";
+        let (out, _) = parse(src);
+        match &out[0] {
+            SmlInline::Ref { scheme: RefScheme::Wikilink, target: RefTarget::Label(l), text, .. } => {
+                assert_eq!(l, "target");
+                assert_eq!(text.slice(src), "display text");
+            }
+            other => panic!("expected wikilink ref, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unclosed_wikilink_falls_back_to_literal() {
+        let src = "[[unclosed";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    #[test]
+    fn empty_wikilink_falls_back_to_literal() {
+        let src = "[[]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    /// D59 スコープ外(§10 保留): 埋め込み `![[target]]` は wikilink として解決せず
+    /// 素通し(既存の「未対応構文はリテラルへフォールバック」方針のまま)。
+    #[test]
+    fn embed_syntax_is_left_untouched() {
+        let src = "![[target]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out, vec![SmlInline::Text(Span::new(0, src.len()))]);
+    }
+
+    /// D40 のバックスラッシュエスケープとの相互作用: 最初の `[` がエスケープされていれば
+    /// wikilink として解釈されない。
+    #[test]
+    fn escaped_opening_bracket_prevents_wikilink() {
+        let src = r"\[[target]]";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 2);
+        assert!(matches!(out[0], SmlInline::Escaped(_)));
+        match &out[1] {
+            SmlInline::Text(sp) => assert_eq!(sp.slice(src), "[target]]"),
+            other => panic!("expected literal text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wikilink_followed_by_more_text() {
+        let src = "見出しは[[目的地]]を参照";
+        let (out, diags) = parse(src);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(out.len(), 3);
+        assert!(matches!(&out[0], SmlInline::Text(sp) if sp.slice(src) == "見出しは"));
+        assert!(matches!(&out[1], SmlInline::Ref { scheme: RefScheme::Wikilink, .. }));
+        assert!(matches!(&out[2], SmlInline::Text(sp) if sp.slice(src) == "を参照"));
     }
 }

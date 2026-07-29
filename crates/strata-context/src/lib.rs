@@ -224,6 +224,18 @@ pub(crate) fn subtree_ids(graph: &Graph, root: NodeId) -> Vec<NodeId> {
 /// 親の判定は `scope` に絞った `matched` 集合で行う(裁量: `--node` 併用時、
 /// scope の境界そのものを暗黙の「根」として扱う — 祖先が scope 外にいて matched で
 /// あっても、そこは展開できないので scope 内の子が chunk の根になるのが自然)。
+///
+/// D61(2026-07-29 裁定、sml-spec §1.19): フロントマターの `class:` により Document
+/// ノード自身が実効 class を持てるようになった。しかし Document は不可視のルート
+/// (`render_block` の Document 枝は何も出力しない、D21/D53 と同じ「Document は本文
+/// として描画されない」原則)なので、chunk の根として選んでしまうと「位置: ...」の
+/// 見出し行だけが出て本文が空になる(文書全体を選んだつもりが何も出ない、というバグ)。
+/// これを避けるため、Document ノードは (a) 「親が matched に含まれるなら子を除外する」
+/// 判定における matched 側から除外する(＝ Document を親に持つ直下ブロックは、
+/// Document 自身が matched でも子として素通りしない)、(b) chunk の根の候補からも
+/// 除外する(＝ Document 自身が結果に出ることは無い)。結果として、文書全体に
+/// class を付けた場合は「文書直下の全トップレベルブロック」が chunk の根になり、
+/// render --hide(文書全体を隠す)と対称の「文書全体を選ぶ」が成立する。
 pub(crate) fn class_chunk_roots(
     graph: &Graph,
     tag: &str,
@@ -235,15 +247,19 @@ pub(crate) fn class_chunk_roots(
         Some(s) => s.iter().copied().collect(),
         None => graph.nodes.keys().copied().collect(),
     };
+    let is_document = |id: NodeId| matches!(graph.nodes.get(&id).map(|n| &n.payload), Some(NodePayload::Document(_)));
     let matched: HashSet<NodeId> = candidates
         .into_iter()
         .filter(|&id| strata_core::has_effective_class(graph, parents, id, &tags))
         .collect();
+    // 親判定に使う「可視な matched」集合(Document を除く)。
+    let matched_visible: HashSet<NodeId> = matched.iter().copied().filter(|&id| !is_document(id)).collect();
     matched
         .iter()
         .copied()
+        .filter(|&id| !is_document(id))
         .filter(|id| match parents.get(id) {
-            Some(p) => !matched.contains(p),
+            Some(p) => !matched_visible.contains(p),
             None => true,
         })
         .collect()

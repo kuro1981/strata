@@ -20,6 +20,7 @@ use strata_sml::Diag;
 use crate::convert::{self, SharedState};
 use crate::error::BuildError;
 use crate::resolve::{self, CrossDocIndex, Registry};
+use crate::title;
 
 /// ワークスペースの1メンバー。`path` は診断表示用のファイル名
 /// (`strata.toml` からの相対パス。裁量: 「ファイル:行:列:」の「ファイル:」に使う)。
@@ -185,14 +186,38 @@ pub fn build_workspace(members: &[Member]) -> Result<WorkspaceBuildOutput, Vec<W
         }
     }
 
+    // D59: `[[wikilink]]` のワークスペース全体解決 index(正規化タイトル → その
+    // タイトルを持つ Document ノードの NodeId 群、複数あれば同名衝突)。フロントマターが
+    // 無い(Document ノードが無い)メンバーは対象外 — wikilink の解決先は常に Document
+    // ノードのため、タイトルがあっても指す先が無ければ意味を成さない。タイトルは
+    // フォールバック連鎖(sml-spec §1.18: title: → 最初の H1 → ファイル名 stem)で決定
+    // する。ファイル名 stem はここ(ワークスペース build)でのみ付加できる — 単一ファイル
+    // build にはファイルパスの概念自体が無い(`title.rs` モジュールコメント参照)。
+    let mut title_index: HashMap<String, Vec<NodeId>> = HashMap::new();
+    for f in &files {
+        let Some(doc_id) = f.registry.document_id else { continue };
+        let path = &members[f.idx].path;
+        let src = &members[f.idx].src;
+        if let Some(t) = title::document_title(src, &f.doc).or_else(|| title::filename_stem(path)) {
+            title_index.entry(title::normalize_title(&t)).or_default().push(doc_id);
+        }
+    }
+
     let mut shared = SharedState::new();
     let mut roots: Vec<DocRoot> = Vec::with_capacity(files.len());
     for f in files {
         let path = members[f.idx].path.clone();
         let src = &members[f.idx].src;
         let doc_alias = f.registry.document_id.and_then(|id| f.registry.id_alias.get(&id).cloned());
-        let (root, pass2_errors) =
-            convert::run(src, &f.doc, f.registry, &mut shared, Some(&cross_doc), Some(&doc_index));
+        let (root, pass2_errors) = convert::run(
+            src,
+            &f.doc,
+            f.registry,
+            &mut shared,
+            Some(&cross_doc),
+            Some(&doc_index),
+            Some(&title_index),
+        );
         for e in pass2_errors {
             errors.push(WorkspaceError::Member { path: path.clone(), error: e });
         }

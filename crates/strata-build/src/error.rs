@@ -47,6 +47,18 @@ pub enum BuildError {
     /// ワークスペース build で `doc:<alias>` の alias がどのメンバー文書の frontmatter
     /// alias にも一致しない(D53)。
     UnknownDoc { alias: String, span: Span },
+    /// 単一ファイル build(`--workspace` 無し)で `[[wikilink]]`(D59、sml-spec §1.18)が
+    /// 自文書のタイトルに一致しなかった。`DocRefNeedsWorkspace` と同型 — 単一ファイル
+    /// build は他文書のタイトルを一切知らないため、「本当に存在しない」のか「ワーク
+    /// スペースを組めば解決する」のか区別できない。黙って落とさず案内する。
+    WikilinkNeedsWorkspace { title: String, span: Span },
+    /// ワークスペース build で `[[wikilink]]` のタイトルがどのメンバー文書のタイトルにも
+    /// 一致しない(D59: 「未解決」— CommonMark 側の無診断リテラル化とは違い、wikilink は
+    /// 明示的にリンクの意図があるため黙って壊さない)。
+    UnresolvedWikilink { title: String, span: Span },
+    /// ワークスペース build で `[[wikilink]]` のタイトルが2つ以上のメンバー文書に
+    /// 一致する(D59: 「同名衝突」— 黙って先頭を選ばず曖昧性を報告する)。
+    AmbiguousWikilink { title: String, span: Span },
     /// build 後の `strata_core::invariants::validate` が検出した違反。正しい実装では
     /// 出ないはずの build 自体のバグ検出網(D-B5)。D-B1 の列挙には無いが、D-B5 が
     /// 「違反があれば BuildError に変換して返す」と明記しているため追加した variant。

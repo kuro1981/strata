@@ -1265,6 +1265,31 @@ fn format_build_error(e: &strata_build::BuildError, src: &str) -> Vec<String> {
                 line, col, alias, alias
             )]
         }
+        // D59: 単一ファイル build で `[[wikilink]]` が自文書のタイトルに一致しなかった。
+        // `DocRefNeedsWorkspace` と同じ理由でワークスペース build を案内する。
+        E::WikilinkNeedsWorkspace { title, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: WikilinkNeedsWorkspace: 参照 '[[{}]]' はワークスペース対応コマンド(`strata build --workspace <strata.toml>` または `strata render --workspace <strata.toml>`)が必要です。",
+                line, col, title
+            )]
+        }
+        // D59: ワークスペース build で `[[wikilink]]` のタイトルがどのメンバーにも一致しない。
+        E::UnresolvedWikilink { title, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: UnresolvedWikilink: 参照 '[[{}]]' — このタイトルを持つ文書がワークスペースにありません。",
+                line, col, title
+            )]
+        }
+        // D59: ワークスペース build で `[[wikilink]]` のタイトルが2つ以上のメンバーに一致する(同名衝突)。
+        E::AmbiguousWikilink { title, span } => {
+            let (line, col) = at(*span, src);
+            vec![format!(
+                "{}:{}: AmbiguousWikilink: 参照 '[[{}]]' — 同じタイトルを持つ文書が複数あり一意に解決できません。",
+                line, col, title
+            )]
+        }
         E::Invariant(v) => vec![format!("-:-: Invariant: {:?}", v)],
     }
 }

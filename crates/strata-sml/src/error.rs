@@ -8,6 +8,10 @@
 //! 結果と併せて呼び出し側に返す(`FmtOutput::warnings` / `BuildOutput::warnings`)。
 //! 新設した2種別(`DuplicateFrontmatterKey` / `UnknownAttrKey`)のみ `Warning`。
 //! 既存の種別はすべて `Error` のまま(挙動は変えない)。
+//!
+//! D60(2026-07-29 裁定): `UnknownFrontmatterKey` を `Error` → `Warning` に格下げる
+//! (`UnknownAttrKey`(D17)と同型)。未知キーを持つファイルでも fmt/build は拒否しない
+//! (全か無かの対象外)。バイトは温存し、frontmatter 自体は書き換えない。
 
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +55,9 @@ pub enum DiagKind {
     InconsistentIndent,
     /// インライン参照のスキームが `ref/term/table/fig/math/cell` のいずれでもない。
     UnknownScheme,
-    /// フロントマター(sml-spec §2.1、D12)の `key: value` 行のキーが `id` / `title`
-    /// のいずれでもない(v0 は「出たら足す」方針)。
+    /// フロントマター(sml-spec §2.1、D12)の `key: value` 行のキーが `id` / `title` /
+    /// `alias` / `class`(D61、sml-spec §1.19)のいずれでもない(v0 は「出たら足す」方針)。
+    /// D60(2026-07-29 裁定)により `Warning`(`UnknownAttrKey` と同型、全か無かの対象外)。
     UnknownFrontmatterKey,
     /// フロントマターの閉じ `---` 単独行が見つからずファイル末尾に到達した。
     UnclosedFrontmatter,
@@ -94,7 +99,8 @@ impl DiagKind {
             DiagKind::DuplicateFrontmatterKey
             | DiagKind::UnknownAttrKey
             | DiagKind::DuplicateRecordKey
-            | DiagKind::HtmlNotSupported => Severity::Warning,
+            | DiagKind::HtmlNotSupported
+            | DiagKind::UnknownFrontmatterKey => Severity::Warning,
             _ => Severity::Error,
         }
     }
