@@ -249,6 +249,31 @@ fn find_byte(bytes: &[u8], start: usize, limit: usize, needle: u8) -> Option<usi
     bytes[start..limit].iter().position(|&b| b == needle).map(|p| p + start)
 }
 
+/// リンクの `[text]` 部分に対応する `]` を、ネストした `[`(`![alt](thumb)` の
+/// ようなリンク化画像イディオム等)を深さで飛び越しながら探す。単純な
+/// 「最初の `]`」探索(`find_byte`)だと `[![alt](thumb)](full)` の内側の
+/// `![alt]` の `]` を外側リンクの閉じ括弧と誤認し、後続の `(` も内側画像の
+/// url を指してしまう(実データ: web クリップ由来の「クリックで拡大」画像
+/// イディオムで142箇所発生、リンク全体が壊れて破片がリテラルテキスト化する
+/// 実害があった)。バックスラッシュエスケープは考慮しない(このパーサ全体の
+/// 既存の簡略方針に合わせる)。
+fn find_matching_close_bracket(bytes: &[u8], start: usize, limit: usize) -> Option<usize> {
+    let mut depth = 0u32;
+    for (i, &b) in bytes.iter().enumerate().take(limit).skip(start) {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                if depth == 0 {
+                    return Some(i);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// `[start, limit)` 内で連続する `c` の個数を数える。
 fn run_length(bytes: &[u8], i: usize, limit: usize, c: u8) -> usize {
     let mut j = i;
@@ -492,7 +517,7 @@ fn try_parse_asset_embed(src: &str, bang: usize, limit: usize) -> Option<(SmlInl
 fn try_parse_link(src: &str, open: usize, limit: usize, diags: &mut Vec<Diag>) -> Option<(SmlInline, usize)> {
     let bytes = src.as_bytes();
     let text_start = open + 1;
-    let close_bracket = find_byte(bytes, text_start, limit, b']')?;
+    let close_bracket = find_matching_close_bracket(bytes, text_start, limit)?;
     if close_bracket + 1 >= limit || bytes[close_bracket + 1] != b'(' {
         return None;
     }
@@ -503,6 +528,23 @@ fn try_parse_link(src: &str, open: usize, limit: usize, diags: &mut Vec<Diag>) -
     let dest_span = Span::new(dest_start, close_paren);
     let dest_text = dest_span.slice(src);
     let next_i = close_paren + 1;
+
+    // リンク化された画像(`[![alt](thumb)](full)`、クリックで拡大表示する web
+    // クリップの定番イディオム)は、strata の `Link.text` がプレーンテキストのみで
+    // ネスト構造を持てないため、Link のままだと内側の `![alt](thumb)` が生の
+    // マークダウンとしてリテラル表示されてしまう(実データで報告された症状)。
+    // 外側 url が外部スキームで、text の中身がちょうど1つの画像で埋まっている
+    // 場合に限り、Link ではなく Image として扱う(裁量: 「クリックで拡大」という
+    // リンクの意味は失われるが、画像そのものが正しく表示される方を優先。外側の
+    // url は通常フル解像度なのでそちらを採用し、内側 thumb 側の alt を引き継ぐ)。
+    if is_external_scheme(dest_text)
+        && bytes.get(text_start) == Some(&b'!')
+        && bytes.get(text_start + 1) == Some(&b'[')
+        && let Some((SmlInline::Image { alt, .. }, consumed)) = try_parse_image(src, text_start, close_bracket, diags)
+        && consumed == close_bracket
+    {
+        return Some((SmlInline::Image { url: dest_span, alt }, next_i));
+    }
 
     // M6(D40、監査②2): http(s)/mailto は外部リンクとして Inline::Link へ。
     if is_external_scheme(dest_text) {

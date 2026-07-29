@@ -349,6 +349,66 @@ fn external_link_becomes_link_node_without_diag() {
     assert!(out.iter().any(|n| matches!(n, SmlInline::Link { url, text } if url.slice(src) == "https://example.com/foo" && text.slice(src) == "外部サイト")));
 }
 
+/// リンク化された画像(`[![alt](thumb)](full)`、web クリップの「クリックで
+/// 拡大」定番イディオム)は、内側 `![alt]` の `]` を外側リンクの閉じ括弧と
+/// 誤認しない(実データ再現: 誤認すると外側 url が内側 thumb url に化け、
+/// 後続テキストが破片としてリテラル化していた)。外側 url を採用した
+/// `Inline::Image` として解決される。
+#[test]
+fn linked_image_becomes_image_node_using_outer_url() {
+    let src = "[![](https://example.com/thumb.png)](https://example.com/full.png)";
+    let (out, diags) = parse(src);
+    assert!(diags.is_empty(), "linked image must not raise diags: {diags:?}");
+    match &out[0] {
+        SmlInline::Image { url, alt } => {
+            assert_eq!(url.slice(src), "https://example.com/full.png");
+            assert_eq!(alt.slice(src), "");
+        }
+        other => panic!("expected image node, got {other:?}"),
+    }
+}
+
+/// alt テキスト付きでも同様に解決され、内側 alt を引き継ぐ。
+#[test]
+fn linked_image_with_alt_keeps_inner_alt_and_outer_url() {
+    let src = "[![サムネ](https://example.com/thumb.png)](https://example.com/full.png)";
+    let (out, _diags) = parse(src);
+    match &out[0] {
+        SmlInline::Image { url, alt } => {
+            assert_eq!(url.slice(src), "https://example.com/full.png");
+            assert_eq!(alt.slice(src), "サムネ");
+        }
+        other => panic!("expected image node, got {other:?}"),
+    }
+}
+
+/// 画像 + 他のテキストが混在するリンク(`[![a](t) 補足](full)`)は、text 全体が
+/// ちょうど1つの画像で埋まっていないため Image への昇格対象にならず、従来どおり
+/// Link のまま(text はプレーンテキストとして生の中身を保持する)。
+#[test]
+fn linked_content_mixing_image_and_text_stays_as_link() {
+    let src = "[![](https://example.com/thumb.png) 補足](https://example.com/full.png)";
+    let (out, _diags) = parse(src);
+    match &out[0] {
+        SmlInline::Link { url, text } => {
+            assert_eq!(url.slice(src), "https://example.com/full.png");
+            assert_eq!(text.slice(src), "![](https://example.com/thumb.png) 補足");
+        }
+        other => panic!("expected link node (mixed content), got {other:?}"),
+    }
+}
+
+/// ネストしていない通常のリンクは今までどおり(回帰確認)。
+#[test]
+fn plain_link_without_nested_bracket_still_works() {
+    let src = "[表示](https://example.com/page)";
+    let (out, diags) = parse(src);
+    assert!(diags.is_empty());
+    assert!(out.iter().any(
+        |n| matches!(n, SmlInline::Link { url, text } if url.slice(src) == "https://example.com/page" && text.slice(src) == "表示")
+    ));
+}
+
 // ---- UnknownScheme --------------------------------------------------------------
 
 #[test]
