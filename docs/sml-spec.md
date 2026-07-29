@@ -291,9 +291,12 @@ title: 機械学習モデルの評価レポート
 
 - キーは v0 では `id`(ULID、任意)・`title`(自由文字列、任意)・`alias`
   (文書エイリアス、key 字句、任意。D41 — ワークスペースの横断参照 `ref:<文書alias>/<...>`
-  の左辺になる)の3つ。未知キーは診断(「出たら足す」方針。`UnknownFrontmatterKey`、`Error`)
-- 同一キー(`id` / `title` / `alias`)が複数行で宣言された場合、挙動は**後勝ち**(最後の宣言が
-  採用される)のまま変えず、診断 `DuplicateFrontmatterKey`(`Warning`、D17)を出す
+  の左辺になる)・`class`(D46 実効 class の値構文、複数可。D61 — 文書全体に
+  効く分類)の4つ。未知キーは診断(「出たら足す」方針。`UnknownFrontmatterKey`、
+  D60 により **`Warning`**。D17 の `UnknownAttrKey` と同型で全か無かの対象外)
+- 同一キー(`id` / `title` / `alias` / `class`)が複数行で宣言された場合、挙動は
+  **後勝ち**(最後の宣言が採用される)のまま変えず、診断 `DuplicateFrontmatterKey`
+  (`Warning`、D17)を出す
 - **`id` の値は ULID のみ**。人間ラベルは書けない(診断)。フロントマターは通常
   fmt が生成するものであり、ラベル → ULID+alias の置換系をここに持ち込まない
 - fmt: フロントマターが**無ければ** `id` 入りで先頭に生成(挿入のみ)。**あって
