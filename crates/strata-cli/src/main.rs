@@ -1304,12 +1304,32 @@ fn print_warnings(warnings: &[strata_sml::Diag], src: &str) {
 }
 
 /// 同一ディレクトリに一時ファイルを書いてから rename する原子的な書き込み。
+///
+/// 一時ファイル名は元ファイル名(`file_name`)を一切含めない固定長プレフィックス
+/// (`.strata-tmp-{pid}-{nanos}-{counter}`)にする。Web クリッパー由来などで元の
+/// ファイル名が NAME_MAX(255バイト)近くまで長いケースがあり、`.{元名}.tmp.{pid}`
+/// のように元名を埋め込む形式だと拡張子を足しただけで NAME_MAX を超えて
+/// `File name too long (os error 36)` になる(単純な切り詰めは長さ制限を先送り
+/// するだけで根本解決にならないため不採用)。一意性は pid + UNIX epoch からの
+/// 経過ナノ秒 + プロセス内アトミックカウンタの組で担保する: pid で他プロセスとの
+/// 衝突を避け、同一プロセス内で短時間に連続呼び出しされても(`site` が複数ファイルを
+/// 続けて書く等)ナノ秒タイムスタンプの解像度不足をカウンタが埋める(カウンタは
+/// プロセス内で単調増加するため同一プロセス内では衝突しない)。
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
+    static TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    let file_name = path.file_name().ok_or_else(|| {
+    // path が file_name を持つことだけ確認する(NAME_MAX 超過検出用ではなく、
+    // rename 先が有効なファイルパスであることの確認)。
+    path.file_name().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "input path has no file name")
     })?;
-    let tmp_path = dir.join(format!(".{}.tmp.{}", file_name.to_string_lossy(), std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = dir.join(format!(".strata-tmp-{}-{}-{}", std::process::id(), nanos, counter));
     fs::write(&tmp_path, contents)?;
     fs::rename(&tmp_path, path)?;
     Ok(())

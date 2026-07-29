@@ -107,6 +107,42 @@ fn fmt_missing_file_exits_1() {
     assert!(stderr_str(&out).contains("Failed to read input file"));
 }
 
+/// 回帰テスト: 元ファイル名が NAME_MAX(255バイト)近くまで長い場合でも fmt が
+/// 成功すること。Web クリッパー由来などで長いファイル名(拡張子込みで250バイト超)
+/// になるケースがあり、write_atomic が一時ファイル名に元ファイル名を埋め込む形式
+/// だと `.{元名}.tmp.{pid}` が NAME_MAX を超えて `File name too long (os error 36)`
+/// になっていた(実データで47ファイル中4件が該当)。一時ファイル名を元ファイル名の
+/// 長さに依存しない固定プレフィックス形式にすることで解消したことを確認する。
+#[test]
+fn fmt_succeeds_with_name_near_name_max() {
+    let tmp = TempDir::new("fmt-long-name");
+    // ".sml" を含めてちょうど 251 バイト(NAME_MAX=255 に対し、旧実装の
+    // `.{name}.tmp.{pid}` だと `.` + name + `.tmp.` + pid 数桁で確実に超過する長さ)。
+    let stem = "a".repeat(247);
+    let name = format!("{stem}.sml");
+    assert_eq!(name.len(), 251, "sanity: intended file name length");
+
+    let src = repo_root().join("docs/sml_example_draft.sml");
+    let contents = std::fs::read_to_string(&src).expect("read fixture");
+    let file = tmp.path().join(&name);
+    std::fs::write(&file, &contents).expect("write long-named fixture");
+
+    let out = run(&["fmt", file.to_str().unwrap()]);
+    assert_eq!(exit_code(&out), 0, "stderr: {}", stderr_str(&out));
+
+    let formatted = std::fs::read_to_string(&file).unwrap();
+    assert_ne!(formatted, contents, "fmt should modify the draft fixture");
+    let reparsed = strata_sml::parse(&formatted);
+    assert!(reparsed.diags.is_empty(), "reparsed diags: {:?}", reparsed.diags);
+
+    // 一時ファイルが残っていないこと。
+    let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(entries, vec![name], "unexpected leftovers: {entries:?}");
+}
+
 /// 整形後、一時ファイルが残っていないこと(原子的書き込みの後始末)。
 #[test]
 fn fmt_leaves_no_temp_files_behind() {

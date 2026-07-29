@@ -1,6 +1,7 @@
 # Obsidian frontmatter マッピング仕様 v0(D61)
 
 策定: 2026-07-29(設計対話から起草)。`docs/sml-spec.md` §1.19(D60〜D62)の実装。
+`split: whitespace` コンビネータ(2.1)は同 §1.20(D63、パイロット移行フィードバック)で追加。
 
 view-def-v1.md(D30〜D35)と同じ思想: **固定コンビネータのみ、スクリプトや正規表現は
 持たない**。マッピングは vault ごとに1ファイル書く。「ユーザーの自由度」は
@@ -59,6 +60,39 @@ class: [ai, mcp]
 D46 の実効 class により、文書直下の全ブロックに自動継承される
 (Obsidian の「ノート全体へのタグ付け」の意味論と一致)。
 
+#### `split: whitespace`(D63)
+
+Web クリッパー系プラグインは複数タグを1リスト項目に空白区切りで詰めることが
+ある(例: `tags: ["clippings RAG tools"]` — 1要素の中に3語)。これを素朴に
+`as: class` へ流すと、値がそのまま1個の class 名として扱われ `class:` の
+字句規則(`[A-Za-z0-9_-]+`、空白不可)に反して `BadClass` で build が落ちる。
+
+`split: whitespace` を `as: class` に添えると、**各リスト項目を空白で分割
+してから**複数 class として展開する(スカラー値・リスト値どちらにも適用可。
+分割後の各トークンが1 class になる):
+
+```yaml
+tags: { as: class, split: whitespace }
+```
+
+```yaml
+# Obsidian 側
+---
+tags: ["clippings RAG tools"]
+---
+```
+```yaml
+# SML 側(生成されるフロントマター)
+---
+title: ...
+class: [clippings, RAG, tools]
+---
+```
+
+`split` を指定しないキー(既定)は、リストの各要素をそのまま1 class として
+扱う(2.1 冒頭の挙動)。`split: whitespace` は空白分割のみを行う固定コンビ
+ネータであり、任意の区切り文字やスクリプトは持たない(D32 の運用に整合)。
+
 ### 2.2 `as: record` — 記述的事実
 
 本文 H1 の直後に `::record` ブロックとして持ち上げる。`key:` で SML 側の
@@ -104,7 +138,7 @@ default: { as: ignore }
 version: 1
 
 frontmatter:
-  tags: { as: class }
+  tags: { as: class, split: whitespace }
 
   author:      { as: record, key: 著者 }
   source:      { as: record, key: 出典, type: ref }
@@ -120,6 +154,30 @@ frontmatter:
   data: { as: ignore }
 
   default: { as: ignore }
+```
+
+**`split: whitespace` が必要になった実例**(kurochanBrainPrivate の Web
+クリップ由来ファイルより、D63)。Web クリッパープラグインが1リスト項目に
+複数語を空白区切りで詰めていたケース:
+
+```yaml
+# Obsidian 側の frontmatter
+---
+tags: ["clippings RAG tools"]
+---
+```
+
+`tags: { as: class }`(`split` なし)のまま変換すると `class: ["clippings RAG tools"]`
+となり、空白を含む値が `class:` の字句規則に反して `strata build` が
+`BadClass` で落ちる。`tags: { as: class, split: whitespace }` にすることで
+正しく3つの class に展開される:
+
+```yaml
+# SML 側(生成されるフロントマター)
+---
+title: ...
+class: [clippings, RAG, tools]
+---
 ```
 
 ## 4. 品質基準
