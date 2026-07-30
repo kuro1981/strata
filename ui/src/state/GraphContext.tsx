@@ -146,7 +146,23 @@ export function GraphProvider({
           (scrollParent ?? el).scrollTo({ top: 0, behavior: "smooth" });
           return;
         }
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        // 実機フィードバック(2026-07-29): 読みたい対象をクリックしているのに
+        // 画面が動くと辛い、との報告。従来は無条件に block: "center" へ
+        // scrollIntoView していたため、既に画面内に見えている要素をクリック
+        // しても中央へ寄せ直されて動いてしまっていた。既に(先頭が)見えている
+        // ときは動かさず、動かす必要があるときも中央でなく先頭合わせにする
+        // (読みたいのは要素の先頭であって中央ではないため)。
+        const scrollParent = el.closest<HTMLElement>("[data-doc-scroll]");
+        if (scrollParent) {
+          const elRect = el.getBoundingClientRect();
+          const parentRect = scrollParent.getBoundingClientRect();
+          const topAlreadyVisible = elRect.top >= parentRect.top && elRect.top <= parentRect.bottom;
+          if (!topAlreadyVisible) {
+            el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }
+        } else {
+          el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
         el.classList.add("strata-block-flash");
         window.setTimeout(() => el.classList.remove("strata-block-flash"), 1200);
       });
